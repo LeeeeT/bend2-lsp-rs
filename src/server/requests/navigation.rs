@@ -5,6 +5,7 @@ use super::super::{
 };
 use super::shared::{binding_at, declaration_token_at};
 use crate::analysis;
+use crate::resolve::{self, Module};
 use crate::workspace::Document;
 use tower_lsp::{
     jsonrpc::Result,
@@ -26,7 +27,7 @@ impl Backend {
     fn import_uri(&self, document: &Document, import: &analysis::IndexedImport) -> Option<Url> {
         tracing::info_span!("navigation.module_lookup").in_scope(|| {
             if import.path_text(&document.text) == "Base" {
-                self.prelude_module(document).map(|module| module.uri)
+                resolve::prelude(self, document).map(|module| module.uri)
             } else {
                 self.workspace
                     .read()
@@ -64,7 +65,7 @@ impl Backend {
             return None;
         }
         let alias = document.syntax.token_text(&document.text, id)?;
-        self.module_document(document, alias).map(|(uri, _)| uri)
+        resolve::module(self, &document.uri, document, alias).map(|module| module.uri)
     }
 
     pub(in crate::server) async fn handle_document_link(
@@ -129,8 +130,8 @@ impl Backend {
             return Ok(None);
         };
         let imported = token.split_once('.').and_then(|(alias, member)| {
-            self.module_document(&doc, alias)
-                .and_then(|(_, source)| analysis::declaration_hover(&source, member))
+            resolve::module(self, &doc.uri, &doc, alias)
+                .and_then(|module| analysis::declaration_hover(&module, member))
         });
         let prelude = self
             .prelude_declaration(&doc, &token)
@@ -232,8 +233,12 @@ impl Backend {
             return Ok(None);
         };
         let target = tracing::info_span!("navigation.module_lookup")
-            .in_scope(|| self.module_document(&doc, alias));
-        let Some((target_uri, target_text)) = target else {
+            .in_scope(|| resolve::module(self, &doc.uri, &doc, alias));
+        let Some(Module {
+            uri: target_uri,
+            snapshot: target_text,
+        }) = target
+        else {
             return Ok(None);
         };
         let range = tracing::info_span!("navigation.declaration_lookup", scope = "imported")
@@ -296,13 +301,12 @@ impl Backend {
             return Ok(None);
         };
         let imported = token.split_once('.').and_then(|(alias, member)| {
-            self.module_document(&doc, alias)
-                .map(|(uri, source)| (uri, source, member.to_owned()))
+            resolve::module(self, &doc.uri, &doc, alias)
+                .map(|module| (module.uri, module.snapshot, member.to_owned()))
         });
         let local = analysis::type_declaration_range(&doc, &token)
             .map(|_| (doc.uri.clone(), doc.snapshot.clone(), token.clone()));
-        let prelude = self
-            .prelude_module(&doc)
+        let prelude = resolve::prelude(self, &doc)
             .filter(|module| analysis::type_declaration_range(module, &token).is_some())
             .map(|module| (module.uri, module.snapshot, token.clone()));
         let (target_uri, target_text, name) = imported

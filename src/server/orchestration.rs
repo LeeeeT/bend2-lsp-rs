@@ -1,6 +1,5 @@
 use super::{
     compiler::CompilerReapers,
-    compiler_service::BaseModule,
     features::named_document_symbol,
     lsp::Backend,
     revision::{RevisionStatus, RevisionTicket, wait_for_captured_revision},
@@ -8,6 +7,7 @@ use super::{
 };
 use crate::{
     analysis::{self, DocumentSnapshot, LineIndex, Revision},
+    resolve::{self, Module, ModuleSource},
     workspace::{Document, FileId, SourceGraph, normalize_path},
 };
 use std::{
@@ -35,6 +35,20 @@ struct PreparedDiskUpdate {
     file: WatchedFile,
     snapshot: Option<Arc<DocumentSnapshot>>,
     imports: Vec<(analysis::TextRange, PathBuf)>,
+}
+
+impl ModuleSource for Backend {
+    fn import_target(&self, source: &Url, path: analysis::TextRange) -> Option<Module> {
+        let document = self.workspace.read().import_target(source, path)?;
+        Some(Module {
+            uri: document.uri,
+            snapshot: document.snapshot,
+        })
+    }
+
+    fn base(&self) -> Option<Module> {
+        self.compiler.base_module.read().clone()
+    }
 }
 
 pub(super) async fn run_staging<T, F>(semaphore: Arc<Semaphore>, operation: F) -> Option<T>
@@ -562,38 +576,8 @@ impl Backend {
         Some(root.join(format!(".bend2-lsp-virtual-{:016x}.bend", hasher.finish())))
     }
 
-    pub(super) fn module_document(
-        &self,
-        source: &Document,
-        alias: &str,
-    ) -> Option<(Url, Arc<DocumentSnapshot>)> {
-        let import = analysis::imports(source)
-            .iter()
-            .find(|import| import.alias_text(&source.text) == Some(alias))?;
-        let imported = import.path_text(&source.text);
-        if imported == "Base" {
-            let base = self.compiler.base_module.read().clone()?;
-            return Some((base.uri, base.snapshot));
-        }
-        let document = self
-            .workspace
-            .read()
-            .import_target(&source.uri, import.path)?;
-        Some((document.uri, document.snapshot))
-    }
-
-    pub(super) fn prelude_module(&self, source: &Document) -> Option<BaseModule> {
-        if !analysis::imports(source)
-            .iter()
-            .any(|import| import.path_text(&source.text) == "Base")
-        {
-            return None;
-        }
-        self.compiler.base_module.read().clone()
-    }
-
-    pub(super) fn prelude_declaration(&self, source: &Document, name: &str) -> Option<BaseModule> {
-        let module = self.prelude_module(source)?;
+    pub(super) fn prelude_declaration(&self, source: &Document, name: &str) -> Option<Module> {
+        let module = resolve::prelude(self, source)?;
         analysis::declaration_range(&module, name)?;
         Some(module)
     }
@@ -604,7 +588,8 @@ impl Backend {
         name: &str,
     ) -> (Url, Arc<DocumentSnapshot>, String) {
         if let Some((alias, member)) = name.split_once('.')
-            && let Some((uri, snapshot)) = self.module_document(document, alias)
+            && let Some(Module { uri, snapshot }) =
+                resolve::module(self, &document.uri, document, alias)
         {
             return (uri, snapshot, member.to_owned());
         }
@@ -624,7 +609,7 @@ impl Backend {
         if named_document_symbol(&snapshot, &member).is_some() {
             return Some((uri, snapshot, member));
         }
-        let module = self.prelude_module(document)?;
+        let module = resolve::prelude(self, document)?;
         named_document_symbol(&module, name)?;
         Some((module.uri, module.snapshot, name.to_owned()))
     }
@@ -711,7 +696,10 @@ impl Backend {
                     continue;
                 }
                 let alias = candidate.syntax.name_text(&candidate.text, qualifier);
-                let Some((module_uri, _)) = self.module_document(&candidate, alias) else {
+                let Some(Module {
+                    uri: module_uri, ..
+                }) = resolve::module(self, &candidate.uri, &candidate, alias)
+                else {
                     continue;
                 };
                 let module_path = self
@@ -939,52 +927,6 @@ impl Backend {
         };
         tracing::Span::current().record("outcome", "committed");
         affected
-    }
-
-    pub(super) fn resolve_call_target(
-        &self,
-        source: &Document,
-        call: &analysis::CallSite,
-    ) -> Option<(Url, Arc<DocumentSnapshot>, analysis::SymbolId)> {
-        if let Some(callee) = call.callee {
-            let symbol = source.syntax.symbol_by_id(callee)?;
-            return (symbol.kind == analysis::SymbolKind::Function)
-                .then(|| (source.uri.clone(), source.snapshot.clone(), callee));
-        }
-        if let Some(qualifier) = call.qualifier {
-            if call
-                .qualifier_token
-                .is_some_and(|token| source.syntax.symbol_for_token(token).is_some())
-            {
-                return None;
-            }
-            let alias = source.syntax.name_text(&source.text, qualifier);
-            let imported = self.module_document(source, alias).or_else(|| {
-                (alias == "Base")
-                    .then(|| self.prelude_module(source))
-                    .flatten()
-                    .map(|module| (module.uri, module.snapshot))
-            })?;
-            let name = source.syntax.name_text(&source.text, call.name);
-            let id = imported
-                .1
-                .syntax
-                .name_id(&imported.1.text, name)
-                .and_then(|name| imported.1.syntax.symbol_by_name(name))
-                .filter(|symbol| symbol.kind == analysis::SymbolKind::Function)?
-                .id;
-            return Some((imported.0, imported.1, id));
-        }
-        let module = self.prelude_module(source)?;
-        let name = source.syntax.name_text(&source.text, call.name);
-        let id = module
-            .snapshot
-            .syntax
-            .name_id(&module.snapshot.text, name)
-            .and_then(|name| module.snapshot.syntax.symbol_by_name(name))
-            .filter(|symbol| symbol.kind == analysis::SymbolKind::Function)?
-            .id;
-        Some((module.uri, module.snapshot, id))
     }
 
     #[tracing::instrument(name = "workspace.query", skip_all, fields(kind = "hierarchy_documents", result_count = tracing::field::Empty))]

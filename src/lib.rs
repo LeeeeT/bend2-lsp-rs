@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod resolve;
 mod server;
 pub mod workspace;
 

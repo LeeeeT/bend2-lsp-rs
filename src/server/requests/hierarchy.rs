@@ -8,6 +8,7 @@ use super::super::{
 };
 use super::shared::declaration_token_at;
 use crate::analysis;
+use crate::resolve::{self, Declaration, Module, Target};
 use tower_lsp::{
     jsonrpc::Result,
     lsp_types::{
@@ -54,7 +55,10 @@ impl Backend {
             .map(|symbol| (doc.uri.clone(), doc.snapshot.clone(), symbol))
             .or_else(|| {
                 let token = selected?;
-                self.resolve_call_target(&doc, doc.syntax.call_for_token(token)?)
+                let call = doc.syntax.call_for_token(token)?;
+                let target = resolve::call_target(self, &doc.uri, &doc.snapshot, call)?;
+                let symbol = target.symbol();
+                Some((target.module.uri, target.module.snapshot, symbol))
             });
         let Some((uri, snapshot, symbol)) = resolved else {
             return Ok(None);
@@ -80,8 +84,14 @@ impl Backend {
                 let Some(caller_id) = call.caller else {
                     continue;
                 };
-                let Some((target_uri, target_snapshot, target_id)) =
-                    self.resolve_call_target(&caller_doc, call)
+                let Some(Target {
+                    module:
+                        Module {
+                            uri: target_uri,
+                            snapshot: target_snapshot,
+                        },
+                    declaration: Declaration::Symbol(target_id),
+                }) = resolve::call_target(self, &caller_doc.uri, &caller_doc.snapshot, call)
                 else {
                     continue;
                 };
@@ -146,8 +156,14 @@ impl Backend {
         };
         let mut calls = Vec::<(CallHierarchyItem, Vec<Range>)>::new();
         for call in caller_doc.syntax.calls_from(caller_id) {
-            let Some((target_uri, target_snapshot, target_id)) =
-                self.resolve_call_target(&caller_doc, call)
+            let Some(Target {
+                module:
+                    Module {
+                        uri: target_uri,
+                        snapshot: target_snapshot,
+                    },
+                declaration: Declaration::Symbol(target_id),
+            }) = resolve::call_target(self, &caller_doc.uri, &caller_doc.snapshot, call)
             else {
                 continue;
             };

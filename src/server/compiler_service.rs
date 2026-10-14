@@ -7,27 +7,17 @@ use super::{
     orchestration::run_staging,
     state::State,
 };
-use crate::analysis::{DocumentSnapshot, Revision};
+use crate::{
+    analysis::{DocumentSnapshot, Revision},
+    resolve::Module,
+};
 use std::{
     collections::HashMap,
-    ops::Deref,
     path::PathBuf,
     sync::{Arc, RwLock},
 };
 use tokio::sync::{Mutex, Semaphore};
 use url::Url;
-
-#[derive(Clone)]
-pub(super) struct BaseModule {
-    pub(super) uri: Url,
-    pub(super) snapshot: Arc<DocumentSnapshot>,
-}
-impl Deref for BaseModule {
-    type Target = DocumentSnapshot;
-    fn deref(&self) -> &Self::Target {
-        &self.snapshot
-    }
-}
 
 struct CachedCompatibility {
     stamp: Option<CompilerStamp>,
@@ -36,7 +26,7 @@ struct CachedCompatibility {
 
 pub(super) struct CompilerService {
     pub(super) config: State<CompilerConfig>,
-    pub(super) base_module: State<Option<BaseModule>>,
+    pub(super) base_module: State<Option<Module>>,
     pub(super) base_module_attempted: State<bool>,
     pub(super) base_module_load: Mutex<()>,
     pub(super) semaphore: Arc<Semaphore>,
@@ -147,7 +137,7 @@ impl Backend {
                 std::fs::write(&path, &source).ok()?;
                 let uri = Url::from_file_path(&path).ok()?;
                 let snapshot = Arc::new(DocumentSnapshot::new(Revision::UNVERSIONED, source));
-                Some((BaseModule { uri, snapshot }, path, directory))
+                Some((Module { uri, snapshot }, path, directory))
             })
             .await
             .flatten();

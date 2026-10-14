@@ -1,6 +1,10 @@
 use super::super::{adapters, features::cursor_in_comment_or_string, lsp::Backend};
 use super::import_edits::{auto_import_plan, import_path_edit};
-use crate::{analysis, workspace::Document};
+use crate::{
+    analysis,
+    resolve::{self, Module},
+    workspace::Document,
+};
 use std::collections::HashSet;
 use tower_lsp::{
     jsonrpc::Result,
@@ -173,7 +177,11 @@ impl Backend {
         let (alias, namespace) = qualifier
             .split_once('.')
             .map_or((qualifier, None), |(alias, rest)| (alias, Some(rest)));
-        if let Some((source_uri, source)) = self.module_document(doc, alias) {
+        if let Some(Module {
+            uri: source_uri,
+            snapshot: source,
+        }) = resolve::module(self, &doc.uri, doc, alias)
+        {
             if in_case_pattern {
                 if expected.is_some_and(|target| target.uri != source_uri) {
                     return Vec::new();
@@ -193,7 +201,7 @@ impl Backend {
         } else {
             let source = expected
                 .map(|target| target.snapshot.clone())
-                .or_else(|| self.prelude_module(doc).map(|module| module.snapshot))
+                .or_else(|| resolve::prelude(self, doc).map(|module| module.snapshot))
                 .unwrap_or_else(|| doc.snapshot.clone());
             adapters::completion_items(if in_case_pattern {
                 analysis::typed_constructor_completion_items(
@@ -229,7 +237,10 @@ impl Backend {
             });
         }
         if let Some((alias, member)) = name.split_once('.')
-            && let Some((uri, source)) = self.module_document(doc, alias)
+            && let Some(Module {
+                uri,
+                snapshot: source,
+            }) = resolve::module(self, &doc.uri, doc, alias)
             && has_type(&source, member)
         {
             return Some(ExplicitCompletionType {
@@ -239,7 +250,7 @@ impl Backend {
                 alias: Some(alias.to_owned()),
             });
         }
-        let source = self.prelude_module(doc)?;
+        let source = resolve::prelude(self, doc)?;
         has_type(&source, name).then(|| ExplicitCompletionType {
             uri: source.uri,
             snapshot: source.snapshot,
@@ -261,7 +272,7 @@ impl Backend {
             analysis::scoped_completion_items(doc, prefix_start, prefix)
         });
         let mut labels: HashSet<String> = items.iter().map(|item| item.label.clone()).collect();
-        if let Some(module) = self.prelude_module(doc) {
+        if let Some(module) = resolve::prelude(self, doc) {
             items.extend(
                 adapters::completion_items(if in_case_pattern {
                     analysis::constructor_completion_items(&module, None, prefix)
