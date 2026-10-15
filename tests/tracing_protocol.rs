@@ -153,7 +153,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let source_path = workspace.join("main.bend");
-        let source = "def trace_disabled_symbol: U32\n  1\n";
+        let source = "def trace_disabled_symbol() -> U32:\n  1\n";
         fs::write(&source_path, source).must_be("write source document");
         let uri = Url::from_file_path(&source_path)
             .must_be("source document URI")
@@ -206,7 +206,7 @@ mod protocol {
             &trace_path,
             &compiler,
             Path::new("main.bend"),
-            "def trace_symbol: U32\n  1\n",
+            "def trace_symbol() -> U32:\n  1\n",
             "trace_symbol",
         );
         let events = trace_events(&raw);
@@ -251,7 +251,7 @@ mod protocol {
         let temp = tempdir().must_be("temporary LSP process directory");
         let trace_path = temp.path().join("trace.json");
         let compiler = install_compiler(&temp.path().join("TRACE_COMMAND_SENTINEL"));
-        let source = "def TRACE_IDENTIFIER_SENTINEL: U32\n  1\n# TRACE_CONTENT_SENTINEL\n";
+        let source = "def TRACE_IDENTIFIER_SENTINEL() -> U32:\n  1\n# TRACE_CONTENT_SENTINEL\n";
         let raw = run_enabled_session(
             &temp,
             &trace_path,

@@ -1,12 +1,13 @@
 use super::super::{
     adapters,
-    features::{cursor_in_comment_or_string, static_hover},
+    features::{cursor_in_comment_or_string, static_hover, token_at},
     lsp::Backend,
+    semantics::{module_at, name_at},
 };
-use super::shared::{binding_at, declaration_token_at};
 use crate::analysis;
-use crate::resolve::{self, Module};
+use crate::semantic::{DeclarationKind, Identity, Semantics, Target};
 use crate::workspace::Document;
+use std::path::{Path, PathBuf};
 use tower_lsp::{
     jsonrpc::Result,
     lsp_types::{
@@ -14,77 +15,87 @@ use tower_lsp::{
         HoverContents, HoverParams, Location, MarkupContent, MarkupKind, Range,
     },
 };
-use tracing::Instrument;
 use url::Url;
 
+fn markdown(value: String) -> Hover {
+    Hover {
+        contents: HoverContents::Markup(MarkupContent {
+            kind: MarkupKind::Markdown,
+            value,
+        }),
+        range: None,
+    }
+}
+
+fn scalar(location: Location) -> GotoDefinitionResponse {
+    GotoDefinitionResponse::Scalar(location)
+}
+
 impl Backend {
+    fn module_location(&self, from: &Url, path: &Path) -> Option<Location> {
+        Some(Location {
+            uri: self.path_uri(from, path)?,
+            range: Range::default(),
+        })
+    }
+
     pub(in crate::server) fn available_import_targets(&self, document: &Document) -> Vec<String> {
         self.workspace
             .read()
             .available_import_targets(&document.uri)
     }
 
-    fn import_uri(&self, document: &Document, import: &analysis::IndexedImport) -> Option<Url> {
-        tracing::info_span!("navigation.module_lookup").in_scope(|| {
-            if import.path_text(&document.text) == "Base" {
-                resolve::prelude(self, document).map(|module| module.uri)
-            } else {
-                self.workspace
-                    .read()
-                    .import_target(&document.uri, import.path)
-                    .map(|target| target.uri)
-            }
-        })
+    fn base_path(&self) -> Option<PathBuf> {
+        let module = self.compiler.base_module.read().clone()?;
+        let path = module.uri.to_file_path().ok()?;
+        Some(std::fs::canonicalize(&path).unwrap_or(path))
     }
 
-    fn import_definition(
+    /// The file that an import of the document loads, as the compiler loads it.
+    fn import_path(
         &self,
+        semantics: &Semantics,
         document: &Document,
         import: &analysis::IndexedImport,
-    ) -> Option<GotoDefinitionResponse> {
-        let uri = self.import_uri(document, import)?;
-        Some(GotoDefinitionResponse::Scalar(Location {
-            uri,
-            range: Range::default(),
-        }))
-    }
-
-    fn module_uri_at(&self, document: &Document, offset: usize) -> Option<Url> {
-        let id = document.syntax.token_at_or_before(offset)?;
-        let token = document.syntax.token(id)?;
-        if token.kind != analysis::TokenKind::Identifier
-            || !token.range.contains(offset)
-            || document.syntax.symbol_for_token(id).is_some()
-            || id.0.checked_sub(1).is_some_and(|previous| {
-                document
-                    .syntax
-                    .token_text(&document.text, analysis::TokenId(previous))
-                    == Some(".")
-            })
-        {
-            return None;
+    ) -> Option<PathBuf> {
+        if import.path_text(&document.text) == "Base" && import.alias.is_none() {
+            let base = self.base_path()?;
+            return semantics.file(&base).map(|file| file.path.clone());
         }
-        let alias = document.syntax.token_text(&document.text, id)?;
-        resolve::module(self, &document.uri, document, alias).map(|module| module.uri)
+        let alias = import.alias_text(&document.text)?;
+        let (_, sub) = semantics
+            .entry_aliases
+            .iter()
+            .find(|(name, _)| name == alias)?;
+        semantics
+            .files
+            .iter()
+            .find(|file| file.ns == *sub)
+            .map(|file| file.path.clone())
     }
 
     pub(in crate::server) async fn handle_document_link(
         &self,
         params: DocumentLinkParams,
     ) -> Result<Option<Vec<DocumentLink>>> {
-        let _workspace_read = self
-            .document_read_with_prelude(&params.text_document.uri)
-            .await;
-        let Some(doc) = self.document(&params.text_document.uri) else {
+        let uri = params.text_document.uri;
+        let _workspace_read = self.document_read_with_prelude(&uri).await;
+        let Some(doc) = self.document(&uri) else {
             return Ok(None);
         };
         if !Self::supported(&doc) {
             return Ok(None);
         }
+        let Some(semantics) = self.semantics(&uri).await else {
+            return Ok(None);
+        };
         let mut links = Vec::new();
         for import in analysis::imports(&doc) {
             let path = import.path_text(&doc.text);
-            if let Some(target) = self.import_uri(&doc, import) {
+            let target = self
+                .import_path(&semantics, &doc, import)
+                .and_then(|target| self.path_uri(&doc.uri, &target));
+            if let Some(target) = target {
                 links.push(DocumentLink {
                     range: adapters::range(&doc, import.path),
                     target: Some(target),
@@ -100,10 +111,8 @@ impl Backend {
         &self,
         params: HoverParams,
     ) -> Result<Option<Hover>> {
-        let _workspace_read = self
-            .document_read_with_prelude(&params.text_document_position_params.text_document.uri)
-            .await;
         let td = params.text_document_position_params;
+        let _workspace_read = self.document_read_with_prelude(&td.text_document.uri).await;
         let Some(doc) = self.document(&td.text_document.uri) else {
             return Ok(None);
         };
@@ -111,159 +120,35 @@ impl Backend {
             return Ok(None);
         }
         let offset = adapters::offset_at(&doc, td.position);
-        if let Some(symbol) = binding_at(&doc, offset) {
-            let value = doc.syntax.binding_by_id(symbol).and_then(|binding| {
-                let ty = doc.syntax.binding_type_range(&doc.text, symbol)?;
-                let name = doc.syntax.name_text(&doc.text, binding.name);
-                let ty = &doc.text[ty.start..ty.end];
-                Some(format!("```bend\n{name}: {ty}\n```"))
-            });
-            return Ok(value.map(|value| Hover {
-                contents: HoverContents::Markup(MarkupContent {
-                    kind: MarkupKind::Markdown,
-                    value,
-                }),
-                range: None,
-            }));
+        if cursor_in_comment_or_string(&doc, offset) {
+            return Ok(None);
         }
-        let Some(token) = declaration_token_at(&doc, adapters::offset_at(&doc, td.position)) else {
-            return Ok(None);
-        };
-        let imported = token.split_once('.').and_then(|(alias, member)| {
-            resolve::module(self, &doc.uri, &doc, alias)
-                .and_then(|module| analysis::declaration_hover(&module, member))
+        let semantics = self.semantics(&td.text_document.uri).await;
+        let value = semantics.as_deref().and_then(|semantics| {
+            let name = name_at(semantics, offset)?;
+            match semantics.target(name) {
+                Target::Local { binder, .. } => {
+                    let entry = semantics.entry()?;
+                    let text = entry.source.get(name.range.start..name.range.end)?;
+                    let ty = semantics.binder_type(binder)?;
+                    Some(format!("```bend\n{text}: {ty}\n```"))
+                }
+                Target::Global(identity) => semantics
+                    .declaration(&identity)
+                    .map(|declaration| format!("```bend\n{}\n```", declaration.detail)),
+                Target::Unresolved { .. } => None,
+            }
         });
-        let prelude = self
-            .prelude_declaration(&doc, &token)
-            .and_then(|module| analysis::declaration_hover(&module, &token));
-        let Some(value) = analysis::declaration_hover(&doc, &token)
-            .or(imported)
-            .or(prelude)
-            .or_else(|| static_hover(&token))
-        else {
-            return Ok(None);
-        };
-        Ok(Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value,
-            }),
-            range: None,
-        }))
+        let value = value.or_else(|| static_hover(&token_at(&doc, offset)));
+        Ok(value.map(markdown))
     }
 
     pub(in crate::server) async fn handle_goto_definition(
         &self,
         params: GotoDefinitionParams,
     ) -> Result<Option<GotoDefinitionResponse>> {
-        let _workspace_read = self
-            .document_read_with_prelude(&params.text_document_position_params.text_document.uri)
-            .instrument(tracing::info_span!("navigation.ensure_prelude"))
-            .await;
         let td = params.text_document_position_params;
-        let Some(doc) = tracing::info_span!("navigation.document_lookup")
-            .in_scope(|| self.document(&td.text_document.uri))
-        else {
-            return Ok(None);
-        };
-        if !Self::supported(&doc) {
-            return Ok(None);
-        }
-        let (offset, in_comment_or_string) = tracing::info_span!("navigation.cursor_lookup")
-            .in_scope(|| {
-                let offset = adapters::offset_at(&doc, td.position);
-                (offset, cursor_in_comment_or_string(&doc, offset))
-            });
-        if in_comment_or_string {
-            return Ok(None);
-        }
-        let import = tracing::info_span!("navigation.import_lookup").in_scope(|| {
-            analysis::imports(&doc).iter().find(|import| {
-                let contains =
-                    |range: analysis::TextRange| range.start <= offset && offset <= range.end;
-                contains(import.path) || import.alias.is_some_and(contains)
-            })
-        });
-        if let Some(import) = import {
-            return Ok(self.import_definition(&doc, import));
-        }
-        let module_uri = self.module_uri_at(&doc, offset);
-        if let Some(uri) = module_uri {
-            return Ok(Some(GotoDefinitionResponse::Scalar(Location {
-                uri,
-                range: Range::default(),
-            })));
-        }
-        let Some(token) = tracing::info_span!("navigation.token_lookup")
-            .in_scope(|| declaration_token_at(&doc, offset))
-        else {
-            return Ok(None);
-        };
-        let local_range = tracing::info_span!("navigation.declaration_lookup", scope = "local")
-            .in_scope(|| analysis::declaration_range(&doc, &token));
-        if let Some(range) = local_range {
-            let response =
-                tracing::info_span!("navigation.location", scope = "local").in_scope(|| {
-                    let range = adapters::range(&doc, range);
-                    GotoDefinitionResponse::Scalar(Location {
-                        uri: doc.uri,
-                        range,
-                    })
-                });
-            return Ok(Some(response));
-        }
-        let prelude = tracing::info_span!("navigation.declaration_lookup", scope = "prelude")
-            .in_scope(|| {
-                let module = self.prelude_declaration(&doc, &token)?;
-                let range = analysis::declaration_range(&module, &token)?;
-                Some((module, range))
-            });
-        if let Some((module, range)) = prelude {
-            let response =
-                tracing::info_span!("navigation.location", scope = "prelude").in_scope(|| {
-                    let range = adapters::range(&module, range);
-                    GotoDefinitionResponse::Scalar(Location {
-                        uri: module.uri,
-                        range,
-                    })
-                });
-            return Ok(Some(response));
-        }
-        let Some((alias, name)) = token.split_once('.') else {
-            return Ok(None);
-        };
-        let target = tracing::info_span!("navigation.module_lookup")
-            .in_scope(|| resolve::module(self, &doc.uri, &doc, alias));
-        let Some(Module {
-            uri: target_uri,
-            snapshot: target_text,
-        }) = target
-        else {
-            return Ok(None);
-        };
-        let range = tracing::info_span!("navigation.declaration_lookup", scope = "imported")
-            .in_scope(|| analysis::declaration_range(&target_text, name));
-        let Some(range) = range else {
-            return Ok(None);
-        };
-        let response =
-            tracing::info_span!("navigation.location", scope = "imported").in_scope(|| {
-                GotoDefinitionResponse::Scalar(Location {
-                    uri: target_uri,
-                    range: adapters::range(&target_text, range),
-                })
-            });
-        Ok(Some(response))
-    }
-
-    pub(in crate::server) async fn handle_goto_type_definition(
-        &self,
-        params: GotoDefinitionParams,
-    ) -> Result<Option<GotoDefinitionResponse>> {
-        let _workspace_read = self
-            .document_read_with_prelude(&params.text_document_position_params.text_document.uri)
-            .await;
-        let td = params.text_document_position_params;
+        let _workspace_read = self.document_read_with_prelude(&td.text_document.uri).await;
         let Some(doc) = self.document(&td.text_document.uri) else {
             return Ok(None);
         };
@@ -271,55 +156,101 @@ impl Backend {
             return Ok(None);
         }
         let offset = adapters::offset_at(&doc, td.position);
-        if let Some(symbol) = binding_at(&doc, offset) {
-            let range = doc
-                .syntax
-                .binding_type_range(&doc.text, symbol)
-                .and_then(|ty| {
-                    let expression = &doc.text[ty.start..ty.end];
-                    doc.syntax
-                        .symbols()
-                        .iter()
-                        .filter(|symbol| symbol.kind == analysis::SymbolKind::Struct)
-                        .find(|symbol| {
-                            expression
-                                .split(|character: char| {
-                                    !character.is_ascii_alphanumeric() && character != '_'
-                                })
-                                .any(|name| name == doc.syntax.name_text(&doc.text, symbol.name))
-                        })
-                        .map(|symbol| symbol.name_range)
-                });
-            return Ok(range.map(|range| {
-                GotoDefinitionResponse::Scalar(Location {
-                    uri: doc.uri.clone(),
-                    range: adapters::range(&doc, range),
-                })
-            }));
+        if cursor_in_comment_or_string(&doc, offset) {
+            return Ok(None);
         }
-        let Some(token) = declaration_token_at(&doc, adapters::offset_at(&doc, td.position)) else {
+        let Some(semantics) = self.semantics(&td.text_document.uri).await else {
             return Ok(None);
         };
-        let imported = token.split_once('.').and_then(|(alias, member)| {
-            resolve::module(self, &doc.uri, &doc, alias)
-                .map(|module| (module.uri, module.snapshot, member.to_owned()))
+        let import = analysis::imports(&doc).iter().find(|import| {
+            let contains =
+                |range: analysis::TextRange| range.start <= offset && offset <= range.end;
+            contains(import.path) || import.alias.is_some_and(contains)
         });
-        let local = analysis::type_declaration_range(&doc, &token)
-            .map(|_| (doc.uri.clone(), doc.snapshot.clone(), token.clone()));
-        let prelude = resolve::prelude(self, &doc)
-            .filter(|module| analysis::type_declaration_range(module, &token).is_some())
-            .map(|module| (module.uri, module.snapshot, token.clone()));
-        let (target_uri, target_text, name) = imported
-            .or(local)
-            .or(prelude)
-            .unwrap_or_else(|| (doc.uri.clone(), doc.snapshot.clone(), token.clone()));
-        let range = analysis::type_declaration_range(&target_text, &name);
-        let Some(range) = range else {
+        if let Some(import) = import {
+            let target = self.import_path(&semantics, &doc, import);
+            return Ok(target
+                .and_then(|path| self.module_location(&doc.uri, &path))
+                .map(scalar));
+        }
+        let Some(name) = name_at(&semantics, offset) else {
             return Ok(None);
         };
-        Ok(Some(GotoDefinitionResponse::Scalar(Location {
-            uri: target_uri,
-            range: adapters::range(&target_text, range),
-        })))
+        if let Some(module) = module_at(&semantics, name, offset) {
+            return Ok(self.module_location(&doc.uri, &module).map(scalar));
+        }
+        let response = match semantics.target(name) {
+            Target::Local { range, .. } => range.map(|range| Location {
+                uri: doc.uri.clone(),
+                range: adapters::range(&doc, range),
+            }),
+            Target::Global(identity) => self.location(&doc.uri, &semantics, &identity),
+            Target::Unresolved { .. } => None,
+        };
+        Ok(response.map(scalar))
     }
+
+    pub(in crate::server) async fn handle_goto_type_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let td = params.text_document_position_params;
+        let _workspace_read = self.document_read_with_prelude(&td.text_document.uri).await;
+        let Some(doc) = self.document(&td.text_document.uri) else {
+            return Ok(None);
+        };
+        if !Self::supported(&doc) {
+            return Ok(None);
+        }
+        let offset = adapters::offset_at(&doc, td.position);
+        if cursor_in_comment_or_string(&doc, offset) {
+            return Ok(None);
+        }
+        let Some(semantics) = self.semantics(&td.text_document.uri).await else {
+            return Ok(None);
+        };
+        let Some(name) = name_at(&semantics, offset) else {
+            return Ok(None);
+        };
+        let identity = match semantics.target(name) {
+            Target::Local { binder, .. } => {
+                let Some(range) = semantics.binder_type_range(binder) else {
+                    return Ok(None);
+                };
+                type_in(&semantics, range)
+            }
+            Target::Global(identity) => type_of(&semantics, &identity),
+            Target::Unresolved { .. } => None,
+        };
+        Ok(identity
+            .and_then(|identity| self.location(&doc.uri, &semantics, &identity))
+            .map(scalar))
+    }
+}
+
+/// The type that a declaration names: a type itself, or the type of a
+/// constructor.
+fn type_of(semantics: &Semantics, identity: &Identity) -> Option<Identity> {
+    let declaration = semantics.declaration(identity)?;
+    match declaration.kind {
+        DeclarationKind::Type => Some(identity.clone()),
+        DeclarationKind::Constructor => semantics
+            .holder(declaration.tld)
+            .map(|holder| holder.identity.clone()),
+        DeclarationKind::Def | DeclarationKind::Law => None,
+    }
+}
+
+/// The first type that a type annotation of the entry names.
+fn type_in(semantics: &Semantics, range: analysis::TextRange) -> Option<Identity> {
+    let entry = semantics.entry()?;
+    entry
+        .names
+        .iter()
+        .filter(|name| range.start <= name.range.start && name.range.end <= range.end)
+        .filter(|name| !name.implicit)
+        .find_map(|name| match semantics.target(name) {
+            Target::Global(identity) => type_of(semantics, &identity),
+            _ => None,
+        })
 }

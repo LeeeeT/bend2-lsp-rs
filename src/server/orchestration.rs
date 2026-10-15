@@ -1,14 +1,12 @@
 use super::{
     compiler::CompilerReapers,
-    features::named_document_symbol,
     lsp::Backend,
     revision::{RevisionStatus, RevisionTicket, wait_for_captured_revision},
     state::revision_result,
 };
 use crate::{
     analysis::{self, DocumentSnapshot, LineIndex, Revision},
-    resolve::{self, Module, ModuleSource},
-    workspace::{Document, FileId, SourceGraph, normalize_path},
+    workspace::{Document, FileId, SourceGraph},
 };
 use std::{
     collections::{HashMap, HashSet, hash_map::DefaultHasher},
@@ -17,10 +15,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::{RwLockReadGuard, Semaphore, watch};
-use tower_lsp::{
-    Client,
-    lsp_types::{DidChangeTextDocumentParams, Location},
-};
+use tower_lsp::{Client, lsp_types::DidChangeTextDocumentParams};
 use tracing::Instrument;
 use url::Url;
 
@@ -35,20 +30,6 @@ struct PreparedDiskUpdate {
     file: WatchedFile,
     snapshot: Option<Arc<DocumentSnapshot>>,
     imports: Vec<(analysis::TextRange, PathBuf)>,
-}
-
-impl ModuleSource for Backend {
-    fn import_target(&self, source: &Url, path: analysis::TextRange) -> Option<Module> {
-        let document = self.workspace.read().import_target(source, path)?;
-        Some(Module {
-            uri: document.uri,
-            snapshot: document.snapshot,
-        })
-    }
-
-    fn base(&self) -> Option<Module> {
-        self.compiler.base_module.read().clone()
-    }
 }
 
 pub(super) async fn run_staging<T, F>(semaphore: Arc<Semaphore>, operation: F) -> Option<T>
@@ -132,6 +113,7 @@ impl Backend {
             registration: Arc::new(super::state::State::new(
                 super::workspace_service::RegistrationState::default(),
             )),
+            semantics_cache: Arc::default(),
         }
     }
     pub(super) fn begin_revision(
@@ -375,9 +357,6 @@ impl Backend {
         Some(document)
     }
 
-    pub(super) fn cached_document(&self, uri: &Url) -> Option<Document> {
-        self.workspace.read().cached_document(uri)
-    }
     #[tracing::instrument(name = "workspace.query", skip_all, fields(kind = "open_documents", result_count = tracing::field::Empty))]
     pub(super) fn workspace_documents(&self) -> Vec<Document> {
         let documents = self.workspace.read().open_documents();
@@ -574,149 +553,6 @@ impl Backend {
         let mut hasher = DefaultHasher::new();
         uri.hash(&mut hasher);
         Some(root.join(format!(".bend2-lsp-virtual-{:016x}.bend", hasher.finish())))
-    }
-
-    pub(super) fn prelude_declaration(&self, source: &Document, name: &str) -> Option<Module> {
-        let module = resolve::prelude(self, source)?;
-        analysis::declaration_range(&module, name)?;
-        Some(module)
-    }
-
-    pub(super) fn symbol_source(
-        &self,
-        document: &Document,
-        name: &str,
-    ) -> (Url, Arc<DocumentSnapshot>, String) {
-        if let Some((alias, member)) = name.split_once('.')
-            && let Some(Module { uri, snapshot }) =
-                resolve::module(self, &document.uri, document, alias)
-        {
-            return (uri, snapshot, member.to_owned());
-        }
-        (
-            document.uri.clone(),
-            document.snapshot.clone(),
-            name.to_owned(),
-        )
-    }
-
-    pub(super) fn hierarchy_source(
-        &self,
-        document: &Document,
-        name: &str,
-    ) -> Option<(Url, Arc<DocumentSnapshot>, String)> {
-        let (uri, snapshot, member) = self.symbol_source(document, name);
-        if named_document_symbol(&snapshot, &member).is_some() {
-            return Some((uri, snapshot, member));
-        }
-        let module = resolve::prelude(self, document)?;
-        named_document_symbol(&module, name)?;
-        Some((module.uri, module.snapshot, name.to_owned()))
-    }
-
-    pub(super) fn hierarchy_document(&self, uri: &Url) -> Option<Document> {
-        self.cached_document(uri)
-    }
-
-    #[tracing::instrument(name = "analysis.query", skip_all, fields(kind = "symbol_references", result_count = tracing::field::Empty))]
-    pub(super) fn symbol_references(
-        &self,
-        target_uri: &Url,
-        name: &str,
-        include_declaration: bool,
-    ) -> Vec<Location> {
-        let span = tracing::Span::current();
-        let target_path = self
-            .document_path(target_uri)
-            .map(|path| normalize_path(&path));
-        let target_snapshot = self
-            .cached_document(target_uri)
-            .map(|document| document.snapshot);
-        let Some(target_snapshot) = target_snapshot else {
-            span.record("result_count", 0);
-            return Vec::new();
-        };
-        let Some(target_name_id) = target_snapshot.syntax.name_id(&target_snapshot.text, name)
-        else {
-            span.record("result_count", 0);
-            return Vec::new();
-        };
-        let Some(target_symbol) = target_snapshot.syntax.symbol_by_name(target_name_id) else {
-            span.record("result_count", 0);
-            return Vec::new();
-        };
-        let target_name = target_snapshot
-            .syntax
-            .name_text(&target_snapshot.text, target_symbol.name)
-            .to_owned();
-        let mut locations = Vec::new();
-        for candidate in self.indexed_documents() {
-            if !Self::supported(&candidate) {
-                continue;
-            }
-            let candidate_path = self
-                .document_path(&candidate.uri)
-                .map(|path| normalize_path(&path));
-            let same_target = candidate.uri == *target_uri
-                || target_path
-                    .as_ref()
-                    .is_some_and(|path| candidate_path.as_ref() == Some(path));
-            if same_target {
-                let Some(candidate_name) = candidate
-                    .syntax
-                    .name_id(&candidate.text, &target_name)
-                    .and_then(|name| candidate.syntax.symbol_by_name(name))
-                else {
-                    continue;
-                };
-                for reference in candidate.syntax.references(candidate_name.id) {
-                    if include_declaration || reference.kind != analysis::ReferenceKind::Declaration
-                    {
-                        locations.push(Location {
-                            uri: candidate.uri.clone(),
-                            range: super::adapters::range(&candidate, reference.range),
-                        });
-                    }
-                }
-                continue;
-            }
-            let Some(candidate_name) = candidate.syntax.name_id(&candidate.text, &target_name)
-            else {
-                continue;
-            };
-            for reference in candidate.syntax.references_named(candidate_name) {
-                let Some(qualifier) = reference.qualifier else {
-                    continue;
-                };
-                if reference.resolved.is_some()
-                    || reference
-                        .qualifier_token
-                        .is_some_and(|token| candidate.syntax.symbol_for_token(token).is_some())
-                {
-                    continue;
-                }
-                let alias = candidate.syntax.name_text(&candidate.text, qualifier);
-                let Some(Module {
-                    uri: module_uri, ..
-                }) = resolve::module(self, &candidate.uri, &candidate, alias)
-                else {
-                    continue;
-                };
-                let module_path = self
-                    .document_path(&module_uri)
-                    .map(|path| normalize_path(&path));
-                if module_path != target_path {
-                    continue;
-                }
-                locations.push(Location {
-                    uri: candidate.uri.clone(),
-                    range: super::adapters::range(&candidate, reference.range),
-                });
-            }
-        }
-        super::reference_locations::sort_and_deduplicate(&mut locations);
-        span.record("result_count", locations.len());
-        locations
     }
 
     pub(super) fn supported(doc: &Document) -> bool {
@@ -927,21 +763,5 @@ impl Backend {
         };
         tracing::Span::current().record("outcome", "committed");
         affected
-    }
-
-    #[tracing::instrument(name = "workspace.query", skip_all, fields(kind = "hierarchy_documents", result_count = tracing::field::Empty))]
-    pub(super) fn hierarchy_documents(&self) -> Vec<Document> {
-        let mut documents = self.indexed_documents();
-        if let Some(module) = self.compiler.base_module.read().clone()
-            && !documents.iter().any(|document| document.uri == module.uri)
-        {
-            documents.push(Document::with_snapshot(
-                module.uri,
-                "bend".into(),
-                module.snapshot,
-            ));
-        }
-        tracing::Span::current().record("result_count", documents.len());
-        documents
     }
 }

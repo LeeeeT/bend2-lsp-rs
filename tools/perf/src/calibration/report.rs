@@ -274,7 +274,7 @@ pub(super) fn validate_job(data: &Value, root: &Path) -> ToolResult<()> {
         identities
             .as_ref()
             .is_some_and(|identities| signals().is_subset(identities)),
-        "missing small/medium/large inlay_hints_warm controls",
+        "missing small/medium/large document_symbols_warm controls",
     )?;
     let pairs: BTreeSet<_> = seen.iter().map(|(pair, _)| *pair).collect();
     require(
@@ -559,7 +559,7 @@ pub(super) fn build_report(jobs: &[Value]) -> ToolResult<Value> {
         .filter(|row| {
             (row["variant"] == "extra_work" || row["variant"] == "extra_alloc")
                 && row["metric"] == "Ir"
-                && row["function_name"] == "inlay_hints_warm"
+                && row["function_name"] == "document_symbols_warm"
                 && matches!(row["id"].as_str(), Some("small" | "medium" | "large"))
         })
         .collect();

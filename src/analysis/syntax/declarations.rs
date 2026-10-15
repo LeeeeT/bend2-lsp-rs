@@ -1,7 +1,6 @@
 use super::{
-    BindingContext, ConstructorIndex, IndexedBinding, IndexedConstructor, IndexedImport,
-    IndexedSymbol, LineIndex, NameTable, SymbolId, SymbolKind, SyntaxLine, TextRange, Token,
-    TokenId, TokenKind,
+    ConstructorIndex, IndexedConstructor, IndexedImport, IndexedSymbol, LineIndex, NameTable,
+    SymbolId, SymbolKind, SyntaxLine, TextRange, Token, TokenKind,
 };
 
 pub(super) fn build_lines(source: &str, index: &LineIndex) -> Vec<SyntaxLine> {
@@ -179,197 +178,7 @@ pub(super) fn parse_constructors(
     })
 }
 
-pub(super) fn parse_bindings(
-    context: &BindingContext<'_>,
-    symbols: &mut [IndexedSymbol],
-) -> Vec<IndexedBinding> {
-    let mut bindings = Vec::new();
-    for symbol in symbols {
-        if symbol.kind != SymbolKind::Function {
-            continue;
-        }
-        let parameter_start = bindings.len();
-        parse_function_parameters(context, symbol, &mut bindings);
-        symbol.parameter_span = TextRange::new(parameter_start, bindings.len());
-        parse_pattern_bindings(context, symbol, &mut bindings);
-    }
-    bindings
-}
-
-fn parse_function_parameters(
-    context: &BindingContext<'_>,
-    symbol: &IndexedSymbol,
-    bindings: &mut Vec<IndexedBinding>,
-) {
-    let header_end = context.lines[symbol.start_line].full_end;
-    let start = context
-        .tokens
-        .partition_point(|token| token.range.start < symbol.name_range.end);
-    let open = context
-        .tokens
-        .get(start)
-        .filter(|token| {
-            token.range.start < header_end
-                && token.kind == TokenKind::Delimiter
-                && &context.source[token.range.start..token.range.end] == "("
-        })
-        .map(|_| TokenId(start));
-    let Some(open) = open else {
-        return;
-    };
-    let close = context
-        .delimiter_pairs
-        .binary_search_by_key(&open, |pair| pair.open)
-        .ok()
-        .map_or_else(
-            || {
-                context
-                    .tokens
-                    .partition_point(|token| token.range.start < header_end)
-            },
-            |pair| context.delimiter_pairs[pair].close.0,
-        );
-    let mut parameter_start = open.0 + 1;
-    for comma in open.0 + 1..close {
-        if context.tokens[comma].kind == TokenKind::Punctuation
-            && context.delimiter_context[comma].value() == Some(open.0)
-            && &context.source[context.tokens[comma].range.start..context.tokens[comma].range.end]
-                == ","
-        {
-            if let Some(token) =
-                parameter_binding_token(context.source, context.tokens, parameter_start, comma)
-                && let Some(binding) =
-                    make_binding(context, bindings.len(), symbol.id, symbol.scope, token)
-            {
-                bindings.push(binding);
-            }
-            parameter_start = comma + 1;
-        }
-    }
-    if let Some(token) =
-        parameter_binding_token(context.source, context.tokens, parameter_start, close)
-        && let Some(binding) = make_binding(context, bindings.len(), symbol.id, symbol.scope, token)
-    {
-        bindings.push(binding);
-    }
-}
-
-fn parse_pattern_bindings(
-    context: &BindingContext<'_>,
-    symbol: &IndexedSymbol,
-    bindings: &mut Vec<IndexedBinding>,
-) {
-    let start_line = symbol.start_line;
-    let end_line = context
-        .lines
-        .partition_point(|line| line.content.start < symbol.scope.end);
-    let mut active_cases = Vec::<(usize, Vec<usize>)>::new();
-    for line in &context.lines[start_line + 1..end_line] {
-        let code = &context.source[line.code.start..line.code.end];
-        if code.trim().is_empty() || code.trim_start().starts_with('#') {
-            continue;
-        }
-        while active_cases
-            .last()
-            .is_some_and(|(indent, _)| line.indent <= *indent)
-        {
-            let Some((_, indices)) = active_cases.pop() else {
-                break;
-            };
-            for index in indices {
-                bindings[index].scope.end = line.content.start;
-            }
-        }
-        let first = context
-            .tokens
-            .partition_point(|token| token.range.start < line.code.start);
-        let limit = context
-            .tokens
-            .partition_point(|token| token.range.start < line.content.end);
-        if first >= limit
-            || context.tokens[first].kind != TokenKind::Identifier
-            || &context.source[context.tokens[first].range.start..context.tokens[first].range.end]
-                != "case"
-        {
-            continue;
-        }
-        let colon = (first + 1..limit).find(|index| {
-            context.tokens[*index].kind == TokenKind::Punctuation
-                && context.delimiter_context[*index].value().is_none()
-                && &context.source
-                    [context.tokens[*index].range.start..context.tokens[*index].range.end]
-                    == ":"
-        });
-        let Some(colon) = colon else {
-            continue;
-        };
-        let scope = TextRange::new(line.full_end, symbol.scope.end);
-        let mut indices = Vec::new();
-        for token_index in first + 1..colon {
-            let token = context.tokens[token_index];
-            if token.kind != TokenKind::Identifier {
-                continue;
-            }
-            let text = &context.source[token.range.start..token.range.end];
-            if !text.as_bytes().first().is_some_and(u8::is_ascii_lowercase)
-                && !text.starts_with('_')
-            {
-                continue;
-            }
-            if let Some(binding) = make_binding(
-                context,
-                bindings.len(),
-                symbol.id,
-                scope,
-                TokenId(token_index),
-            ) {
-                indices.push(bindings.len());
-                bindings.push(binding);
-            }
-        }
-        if !indices.is_empty() {
-            active_cases.push((line.indent, indices));
-        }
-    }
-}
-
-fn parameter_binding_token(
-    source: &str,
-    tokens: &[Token],
-    start: usize,
-    end: usize,
-) -> Option<TokenId> {
-    (start..end)
-        .take_while(|index| {
-            !(tokens[*index].kind == TokenKind::Punctuation
-                && &source[tokens[*index].range.start..tokens[*index].range.end] == ":")
-        })
-        .find(|index| tokens[*index].kind == TokenKind::Identifier)
-        .map(TokenId)
-}
-
-fn make_binding(
-    context: &BindingContext<'_>,
-    binding_index: usize,
-    owner: SymbolId,
-    scope: TextRange,
-    token: TokenId,
-) -> Option<IndexedBinding> {
-    Some(IndexedBinding {
-        id: SymbolId(context.symbol_count + binding_index),
-        owner,
-        name: context.names.for_token(token)?,
-        name_range: context.tokens.get(token.0)?.range,
-        scope,
-        declaration: token,
-    })
-}
-
-pub(super) fn declaration_tokens(
-    tokens: &[Token],
-    symbols: &[IndexedSymbol],
-    bindings: &[IndexedBinding],
-) -> Vec<bool> {
+pub(super) fn declaration_tokens(tokens: &[Token], symbols: &[IndexedSymbol]) -> Vec<bool> {
     let mut declarations = vec![false; tokens.len()];
     for symbol in symbols {
         let start = tokens.partition_point(|token| token.range.start < symbol.name_range.start);
@@ -379,9 +188,6 @@ pub(super) fn declaration_tokens(
                 declarations[start + offset] = true;
             }
         }
-    }
-    for binding in bindings {
-        declarations[binding.declaration.0] = true;
     }
     declarations
 }
@@ -432,7 +238,6 @@ fn parse_top_level_symbol(
         name,
         name_range,
         detail_range,
-        parameter_span: TextRange::new(0, 0),
         scope: TextRange::new(line.full_end, line.full_end),
         kind,
         start_line: line_number,

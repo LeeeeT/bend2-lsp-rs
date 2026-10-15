@@ -44,6 +44,7 @@ pub(super) struct Backend {
     pub(super) compiler: Arc<super::compiler_service::CompilerService>,
     pub(super) diagnostics: Arc<super::diagnostics::DiagnosticsService>,
     pub(super) registration: Arc<super::state::State<super::workspace_service::RegistrationState>>,
+    pub(super) semantics_cache: Arc<super::semantics::SemanticCache>,
 }
 
 #[tower_lsp::async_trait]

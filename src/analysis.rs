@@ -2,9 +2,8 @@
 mod syntax;
 
 pub use syntax::{
-    CallSite, CasePatternType, DiagnosticKind, IndexedBinding, IndexedConstructor, IndexedImport,
-    IndexedSymbol, NameId, Reference, ReferenceKind, SymbolId, SyntaxDiagnostic, SyntaxIndex,
-    Token, TokenFlags, TokenId, TokenKind,
+    CallSite, DiagnosticKind, IndexedConstructor, IndexedImport, IndexedSymbol, NameId, Reference,
+    ReferenceKind, SymbolId, SyntaxDiagnostic, SyntaxIndex, Token, TokenFlags, TokenId, TokenKind,
 };
 
 pub type Import = IndexedImport;
@@ -244,23 +243,6 @@ pub struct Completion {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct InlayHint {
-    pub position: usize,
-    pub parameter_name: TextRange,
-}
-
-impl InlayHint {
-    #[must_use]
-    pub fn label(&self, source: &str) -> String {
-        let name = &source[self.parameter_name.start..self.parameter_name.end];
-        let mut label = String::with_capacity(name.len() + 2);
-        label.push_str(name);
-        label.push_str(": ");
-        label
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FoldingRange {
     pub start_line: usize,
     pub end_line: usize,
@@ -295,11 +277,6 @@ pub struct WorkspaceSymbol<'a> {
 #[must_use]
 pub fn imports(snapshot: &DocumentSnapshot) -> &[Import] {
     snapshot.syntax.imports()
-}
-
-#[must_use]
-pub fn inlay_hints(snapshot: &DocumentSnapshot, range: TextRange) -> Vec<InlayHint> {
-    snapshot.syntax.parameter_hints(range).collect()
 }
 
 #[must_use]
@@ -400,107 +377,6 @@ pub fn selection_range(snapshot: &DocumentSnapshot, mut offset: usize) -> Select
     }
 }
 
-#[must_use]
-pub fn semantic_tokens(snapshot: &DocumentSnapshot) -> Vec<SemanticToken> {
-    let source = &snapshot.text;
-    let syntax = &snapshot.syntax;
-    let mut result = Vec::with_capacity(syntax.semantic_token_count());
-    for (index, token) in syntax.tokens().iter().enumerate() {
-        let token_type = match token.kind {
-            TokenKind::Comment => Some(17),
-            TokenKind::StringLiteral => Some(18),
-            TokenKind::Number => Some(19),
-            TokenKind::Operator => Some(20),
-            TokenKind::Identifier => {
-                let token_id = TokenId(index);
-                let name = syntax.name_for_token(token_id);
-                let symbol = syntax.symbol_for_token(token_id);
-                if name.is_some_and(|name| syntax.is_keyword(name)) {
-                    Some(15)
-                } else if let Some(symbol) = symbol.and_then(|id| syntax.symbol_by_id(id)) {
-                    Some(if symbol.kind == SymbolKind::Function {
-                        12
-                    } else {
-                        1
-                    })
-                } else if symbol.is_some_and(|id| syntax.binding_by_id(id).is_some()) {
-                    Some(8)
-                } else if name.is_some_and(|name| {
-                    syntax
-                        .name_text(source, name)
-                        .as_bytes()
-                        .first()
-                        .is_some_and(u8::is_ascii_uppercase)
-                }) {
-                    Some(1)
-                } else {
-                    Some(8)
-                }
-            }
-            TokenKind::Punctuation | TokenKind::Delimiter => None,
-        };
-        if let Some(token_type) = token_type {
-            result.push(SemanticToken {
-                range: token.range,
-                token_type,
-            });
-        }
-    }
-    result
-}
-
-pub fn signature_help(snapshot: &DocumentSnapshot, offset: usize) -> Option<SignatureHelp> {
-    let source = &snapshot.text;
-    let syntax = &snapshot.syntax;
-    let (_name, active_parameter, _open, callee) = syntax.active_call(source, offset)?;
-    let declaration = syntax
-        .symbol_for_token(callee)
-        .and_then(|id| syntax.symbol_by_id(id))?;
-    if declaration.kind != SymbolKind::Function {
-        return None;
-    }
-    let detail = &source[declaration.detail_range.start..declaration.detail_range.end];
-    let open = detail.find('(')?;
-    let close = detail.rfind(')')?;
-    let parameters: Vec<String> = split_parameters(&detail[open + 1..close])
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-    let active_parameter = usize::try_from(active_parameter)
-        .unwrap_or(usize::MAX)
-        .min(parameters.len().saturating_sub(1));
-    Some(SignatureHelp {
-        label: detail.to_owned(),
-        parameters,
-        active_parameter,
-    })
-}
-
-fn split_parameters(parameters: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut start = 0;
-    let mut depth = 0_i32;
-    for (index, character) in parameters.char_indices() {
-        match character {
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            ',' if depth == 0 => {
-                let parameter = parameters[start..index].trim();
-                if !parameter.is_empty() {
-                    result.push(parameter);
-                }
-                start = index + character.len_utf8();
-            }
-            _ => {}
-        }
-    }
-    let parameter = parameters[start..].trim();
-    if !parameter.is_empty() {
-        result.push(parameter);
-    }
-    result
-}
-
 /// Exact, prefix, and subsequence matching without allocating candidate strings.
 /// Lower tuples rank first; ties are resolved by scope and then label by the caller.
 #[must_use]
@@ -566,118 +442,20 @@ fn subsequence_completion_match(label: &str, query: &str) -> Option<(u8, usize, 
     None
 }
 
+/// Complete the constructors that a file declares.
 #[must_use]
-pub fn completion_items(snapshot: &DocumentSnapshot, prefix: &str) -> Vec<Completion> {
-    let ascii_prefix = prefix.is_ascii();
-    let mut items = collect_module_completions(snapshot, prefix, ascii_prefix);
-    append_keyword_completions(&mut items, prefix, ascii_prefix);
-    items
-}
-
-/// Complete visible local bindings and declarations at a snapshot-local cursor.
-#[must_use]
-pub fn scoped_completion_items(
-    snapshot: &DocumentSnapshot,
-    offset: usize,
-    prefix: &str,
-) -> Vec<Completion> {
-    let source = &snapshot.text;
-    let syntax = &snapshot.syntax;
-    let ascii_prefix = prefix.is_ascii();
-    let mut local_names: Vec<NameId> = syntax
-        .bindings_at(offset)
-        .filter_map(|binding| {
-            completion_matches(syntax.name_text(source, binding.name), prefix, ascii_prefix)
-                .then_some(binding.name)
-        })
-        .collect();
-    local_names.sort_unstable_by_key(|name| name.0);
-    local_names.dedup();
-    let mut items = Vec::new();
-    if !local_names.is_empty() {
-        items.extend(local_names.iter().map(|name| Completion {
-            label: syntax.name_text(source, *name).to_owned(),
-            detail: "Local binding".into(),
-            kind: CompletionKind::Variable,
-        }));
-        items.sort_unstable_by(|left, right| left.label.cmp(&right.label));
-    }
-    for symbol in syntax.symbols() {
-        let name = syntax.name_text(source, symbol.name);
-        if completion_matches(name, prefix, ascii_prefix)
-            && (local_names.is_empty()
-                || local_names
-                    .binary_search_by_key(&symbol.name.0, |name| name.0)
-                    .is_err())
-        {
-            items.push(completion(
-                name.to_owned(),
-                source[symbol.detail_range.start..symbol.detail_range.end].to_owned(),
-                symbol.kind,
-            ));
-        }
-    }
-    append_keyword_completions(&mut items, prefix, ascii_prefix);
-    items
-}
-
-fn append_keyword_completions(items: &mut Vec<Completion>, prefix: &str, ascii_prefix: bool) {
-    for keyword in [
-        "def", "type", "law", "match", "case", "do", "return", "for", "exs", "where", "import",
-        "as",
-    ] {
-        if completion_matches(keyword, prefix, ascii_prefix)
-            && !items.iter().any(|item| item.label == keyword)
-        {
-            items.push(Completion {
-                label: keyword.into(),
-                detail: "Bend keyword".into(),
-                kind: CompletionKind::Keyword,
-            });
-        }
-    }
-}
-
-/// Complete indexed ADT constructors, optionally within a qualified namespace.
-#[must_use]
-pub fn constructor_completion_items(
-    snapshot: &DocumentSnapshot,
-    qualifier: Option<&str>,
-    prefix: &str,
-) -> Vec<Completion> {
-    typed_constructor_completion_items(snapshot, qualifier, prefix, None)
-}
-
-/// Restrict constructors only after the caller resolves a known explicit type.
-#[must_use]
-pub fn typed_constructor_completion_items(
-    snapshot: &DocumentSnapshot,
-    qualifier: Option<&str>,
-    prefix: &str,
-    expected_type: Option<&str>,
-) -> Vec<Completion> {
+pub fn constructor_completion_items(snapshot: &DocumentSnapshot, prefix: &str) -> Vec<Completion> {
     let syntax = &snapshot.syntax;
     let source = &snapshot.text;
     let ascii_prefix = prefix.is_ascii();
     let mut items = Vec::new();
     for parent in syntax.symbols() {
-        if parent.kind != SymbolKind::Struct
-            || expected_type
-                .is_some_and(|expected| syntax.name_text(source, parent.name) != expected)
-        {
+        if parent.kind != SymbolKind::Struct {
             continue;
         }
         for constructor in syntax.constructors(parent.id) {
-            let name = syntax.name_text(source, constructor.name);
-            let label = match qualifier {
-                Some(qualifier) => name
-                    .strip_prefix(qualifier)
-                    .and_then(|name| name.strip_prefix('.')),
-                None => Some(name),
-            };
-            if let Some(label) =
-                label.filter(|label| completion_matches(label, prefix, ascii_prefix))
-            {
+            let label = syntax.name_text(source, constructor.name);
+            if completion_matches(label, prefix, ascii_prefix) {
                 let parent_name = syntax.name_text(source, parent.name);
                 let mut detail = String::with_capacity("constructor of ".len() + parent_name.len());
                 detail.push_str("constructor of ");
@@ -719,33 +497,6 @@ fn collect_module_completions(
     items
 }
 
-#[must_use]
-pub fn qualified_completion_items(
-    snapshot: &DocumentSnapshot,
-    qualifier: &str,
-    prefix: &str,
-) -> Vec<Completion> {
-    let source = &snapshot.text;
-    let syntax = &snapshot.syntax;
-    let ascii_prefix = prefix.is_ascii();
-    syntax
-        .symbols()
-        .iter()
-        .filter_map(|symbol| {
-            let name = syntax.name_text(source, symbol.name);
-            let label = name.strip_prefix(qualifier)?.strip_prefix('.')?;
-            completion_matches(label, prefix, ascii_prefix).then(|| {
-                let label = label.to_owned();
-                completion(
-                    label,
-                    source[symbol.detail_range.start..symbol.detail_range.end].to_owned(),
-                    symbol.kind,
-                )
-            })
-        })
-        .collect()
-}
-
 fn completion(label: String, detail: String, symbol_kind: SymbolKind) -> Completion {
     let kind = match symbol_kind {
         SymbolKind::Function | SymbolKind::Constructor => CompletionKind::Function,
@@ -756,24 +507,6 @@ fn completion(label: String, detail: String, symbol_kind: SymbolKind) -> Complet
         detail,
         kind,
     }
-}
-
-#[must_use]
-pub fn identifier_ranges(snapshot: &DocumentSnapshot, name: &str) -> Vec<TextRange> {
-    let syntax = &snapshot.syntax;
-    let Some(name) = syntax.name_id(&snapshot.text, name) else {
-        return Vec::new();
-    };
-    if let Some(symbol) = syntax.symbol_id_by_name(name) {
-        return syntax
-            .references(symbol)
-            .map(|reference| reference.range)
-            .collect();
-    }
-    syntax
-        .references_named(name)
-        .map(|reference| reference.range)
-        .collect()
 }
 
 /// Normalize a case-insensitive symbol query once for all indexed documents.
@@ -830,33 +563,6 @@ pub fn declaration_range(snapshot: &DocumentSnapshot, name: &str) -> Option<Text
 }
 
 #[must_use]
-pub fn type_declaration_range(snapshot: &DocumentSnapshot, name: &str) -> Option<TextRange> {
-    let source = &snapshot.text;
-    snapshot
-        .syntax
-        .symbols()
-        .iter()
-        .find(|symbol| {
-            symbol.kind == SymbolKind::Struct
-                && snapshot.syntax.name_text(source, symbol.name) == name
-        })
-        .map(|symbol| symbol.name_range)
-}
-
-#[must_use]
-pub fn declaration_hover(snapshot: &DocumentSnapshot, name: &str) -> Option<String> {
-    let source = &snapshot.text;
-    let syntax = &snapshot.syntax;
-    if let Some(name_id) = syntax.name_id(source, name)
-        && let Some(declaration) = syntax.symbol_by_name(name_id)
-    {
-        let detail = &source[declaration.detail_range.start..declaration.detail_range.end];
-        return Some(format!("```bend\n{detail}\n```"));
-    }
-    None
-}
-
-#[must_use]
 pub fn document_symbols(snapshot: &DocumentSnapshot) -> Vec<Symbol> {
     let source = &snapshot.text;
     let syntax = &snapshot.syntax;
@@ -889,34 +595,6 @@ pub fn document_symbols(snapshot: &DocumentSnapshot) -> Vec<Symbol> {
             }
         })
         .collect()
-}
-
-#[must_use]
-pub fn document_symbol_by_id(snapshot: &DocumentSnapshot, id: SymbolId) -> Option<Symbol> {
-    let source = &snapshot.text;
-    let syntax = &snapshot.syntax;
-    let declaration = syntax.symbol_by_id(id)?;
-    let end = syntax
-        .symbols()
-        .get(id.0 + 1)
-        .and_then(|next| syntax.line_content_range(next.start_line))
-        .map_or(source.len(), |line| line.start);
-    let start = syntax
-        .line_content_range(declaration.start_line)
-        .map_or(0, |line| line.start);
-    let children = if declaration.kind == SymbolKind::Struct {
-        constructor_symbols(snapshot, declaration)
-    } else {
-        Vec::new()
-    };
-    Some(Symbol {
-        name: syntax.name_text(source, declaration.name).to_owned(),
-        detail: source[declaration.detail_range.start..declaration.detail_range.end].to_owned(),
-        kind: declaration.kind,
-        range: TextRange::new(start, end),
-        selection_range: declaration.name_range,
-        children,
-    })
 }
 
 fn constructor_symbols(snapshot: &DocumentSnapshot, parent: &IndexedSymbol) -> Vec<Symbol> {

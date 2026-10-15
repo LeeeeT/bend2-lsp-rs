@@ -2,61 +2,188 @@ use super::super::{adapters, features::cursor_in_comment_or_string, lsp::Backend
 use super::import_edits::{auto_import_plan, import_path_edit};
 use crate::{
     analysis,
-    resolve::{self, Module},
+    semantic::{Declaration, DeclarationKind, Semantics, Target},
     workspace::Document,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tower_lsp::{
     jsonrpc::Result,
     lsp_types::{
         CompletionItem, CompletionItemKind, CompletionItemLabelDetails, CompletionList,
-        CompletionParams, CompletionResponse, CompletionTextEdit, InlayHint, InlayHintParams,
-        SignatureHelp, SignatureHelpParams,
+        CompletionParams, CompletionResponse, CompletionTextEdit, InlayHint, InlayHintKind,
+        InlayHintLabel, InlayHintParams, SignatureHelp, SignatureHelpParams, TextEdit,
     },
 };
 
-struct ExplicitCompletionType {
-    uri: url::Url,
-    snapshot: std::sync::Arc<analysis::DocumentSnapshot>,
-    name: String,
-    alias: Option<String>,
+const KEYWORDS: [&str; 12] = [
+    "def", "type", "law", "match", "case", "do", "return", "for", "exs", "where", "is", "import",
+];
+
+fn is_name_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'.'
 }
 
-fn completion_qualifier(
-    doc: &analysis::DocumentSnapshot,
-    prefix_start: usize,
-) -> Option<(analysis::TokenId, &str)> {
-    let syntax = &doc.syntax;
-    let previous = prefix_start.checked_sub(1)?;
-    let dot_id = syntax.token_at_or_before(previous)?;
-    let dot = syntax.token(dot_id)?;
-    if syntax.token_text(&doc.text, dot_id) != Some(".") || dot.range.end != prefix_start {
-        return None;
+/// The range of the name that the cursor is in or at the end of.
+fn name_run(text: &str, offset: usize) -> analysis::TextRange {
+    let bytes = text.as_bytes();
+    let mut start = offset.min(bytes.len());
+    while start > 0 && bytes.get(start - 1).copied().is_some_and(is_name_byte) {
+        start -= 1;
     }
-    let mut root = analysis::TokenId(dot_id.0.checked_sub(1)?);
-    let end = syntax.token(root)?.range.end;
-    loop {
-        let token = syntax.token(root)?;
-        if token.kind != analysis::TokenKind::Identifier {
-            return None;
+    let mut end = offset.min(bytes.len());
+    while bytes.get(end).copied().is_some_and(is_name_byte) {
+        end += 1;
+    }
+    analysis::TextRange::new(start, end)
+}
+
+/// The name typed before the cursor. After a dot, completion offers the rest
+/// of each spelling that starts with the typed qualifier, and replaces only the
+/// text after the dot.
+struct Typed<'a> {
+    whole: &'a str,
+    qualifier: &'a str,
+    member: &'a str,
+    range: analysis::TextRange,
+}
+
+impl<'a> Typed<'a> {
+    fn new(text: &'a str, offset: usize) -> Self {
+        let run = name_run(text, offset);
+        let whole = &text[run.start..offset];
+        let split = whole.rfind('.').map_or(0, |dot| dot + 1);
+        Self {
+            whole,
+            qualifier: &whole[..split],
+            member: &whole[split..],
+            range: analysis::TextRange::new(run.start + split, run.end),
         }
-        let Some(previous_dot) = root.0.checked_sub(1).map(analysis::TokenId) else {
-            break;
-        };
-        let previous = syntax.token(previous_dot)?;
-        if syntax.token_text(&doc.text, previous_dot) != Some(".")
-            || previous.range.end != token.range.start
+    }
+
+    /// The label of a spelling: its rest after the typed qualifier, when the
+    /// rest matches the typed member.
+    fn label<'s>(&self, spelling: &'s str) -> Option<&'s str> {
+        let rest = spelling.strip_prefix(self.qualifier)?;
+        analysis::completion_match(rest, self.member).map(|_| rest)
+    }
+}
+
+fn declaration_item(label: String, declaration: &Declaration) -> CompletionItem {
+    let mut item = CompletionItem::new_simple(label, declaration.detail.clone());
+    item.kind = Some(match declaration.kind {
+        DeclarationKind::Def | DeclarationKind::Law => CompletionItemKind::FUNCTION,
+        DeclarationKind::Type => CompletionItemKind::STRUCT,
+        DeclarationKind::Constructor => CompletionItemKind::CONSTRUCTOR,
+    });
+    item
+}
+
+/// Whether a partial load stopped at the end of its entry's text, so that
+/// its binders in scope are the scope there.
+fn stopped_at_end(before: &Semantics) -> bool {
+    let Some(entry) = before.entry() else {
+        return false;
+    };
+    before.error.as_ref().is_some_and(|error| {
+        error.at.as_ref().is_some_and(|(path, range)| {
+            *path == entry.path && range.start >= entry.source.trim_end().len()
+        })
+    })
+}
+
+/// The locals in scope where a partial load stopped, innermost first.
+fn local_items(
+    before: &Semantics,
+    typed: &Typed,
+    labels: &mut HashSet<String>,
+) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    if !stopped_at_end(before) {
+        return items;
+    }
+    for (name, binder) in before.scope.iter().rev() {
+        if name.is_empty()
+            || name == "_"
+            || typed.label(name).is_none()
+            || !labels.insert(name.clone())
         {
-            break;
+            continue;
         }
-        let previous_name = analysis::TokenId(previous_dot.0.checked_sub(1)?);
-        if syntax.token(previous_name)?.range.end != previous.range.start {
-            break;
-        }
-        root = previous_name;
+        let detail = before
+            .binder_type(*binder)
+            .map_or_else(|| "Local binding".to_owned(), |ty| format!("{name}: {ty}"));
+        let mut item = CompletionItem::new_simple(name.clone(), detail);
+        item.kind = Some(CompletionItemKind::VARIABLE);
+        items.push(item);
     }
-    let start = syntax.token(root)?.range.start;
-    Some((root, &doc.text[start..end]))
+    items
+}
+
+/// The declarations that a name typed where a partial load stopped can name:
+/// those it sees, and the entry's own later declarations, which an unknown
+/// name of the entry names.
+fn declaration_items(
+    before: &Semantics,
+    whole: Option<&Semantics>,
+    typed: &Typed,
+    pattern: bool,
+    labels: &mut HashSet<String>,
+) -> Vec<CompletionItem> {
+    let mut offered: Vec<(String, &Declaration)> = before.visible();
+    if let Some(whole) = whole
+        && let Some(entry) = whole.entry()
+    {
+        for declaration in whole.declarations_in(&entry.path) {
+            let (_, name) = declaration
+                .key
+                .split_once(':')
+                .unwrap_or(("", &declaration.key));
+            offered.push((name.to_owned(), declaration));
+        }
+    }
+    let mut items = Vec::new();
+    for (spelling, declaration) in offered {
+        let wanted = !pattern || declaration.kind == DeclarationKind::Constructor;
+        if wanted
+            && let Some(label) = typed.label(&spelling)
+            && labels.insert(label.to_owned())
+        {
+            items.push(declaration_item(label.to_owned(), declaration));
+        }
+    }
+    items
+}
+
+fn keyword_items(typed: &Typed, labels: &mut HashSet<String>) -> Vec<CompletionItem> {
+    KEYWORDS
+        .iter()
+        .filter(|keyword| typed.label(keyword).is_some())
+        .filter(|keyword| labels.insert((**keyword).to_owned()))
+        .map(|keyword| {
+            let mut item = CompletionItem::new_simple((*keyword).to_owned(), "Keyword".into());
+            item.kind = Some(CompletionItemKind::KEYWORD);
+            item
+        })
+        .collect()
+}
+
+fn alias_items(doc: &Document, typed: &Typed, labels: &mut HashSet<String>) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+    for import in analysis::imports(doc) {
+        if let Some(alias) = import
+            .alias_text(&doc.text)
+            .filter(|alias| typed.label(alias).is_some())
+            && labels.insert(alias.to_owned())
+        {
+            let mut item = CompletionItem::new_simple(
+                alias.to_owned(),
+                format!("Imported module {}", import.path_text(&doc.text)),
+            );
+            item.kind = Some(CompletionItemKind::MODULE);
+            items.push(item);
+        }
+    }
+    items
 }
 
 impl Backend {
@@ -66,15 +193,14 @@ impl Backend {
     ) -> Result<Option<CompletionResponse>> {
         let discovery_incomplete = {
             // Preserve preceding watcher updates without waiting for the
-            // background initial scan. Local bindings are already indexed.
+            // background initial scan.
             let _serial = self.workspace.update_serial.lock().await;
             self.workspace.discovery_pending()
         };
-        let _workspace_read = self
-            .document_read_with_prelude(&params.text_document_position.text_document.uri)
-            .await;
         let td = params.text_document_position;
-        let Some(doc) = self.document(&td.text_document.uri) else {
+        let uri = td.text_document.uri;
+        let _workspace_read = self.document_read_with_prelude(&uri).await;
+        let Some(doc) = self.document(&uri) else {
             return Ok(None);
         };
         if !Self::supported(&doc) {
@@ -84,8 +210,7 @@ impl Backend {
         if cursor_in_comment_or_string(&doc, offset) {
             return Ok(Some(CompletionResponse::Array(Vec::new())));
         }
-        let syntax = &doc.syntax;
-        if let Some(path) = syntax.completion_import_path(offset) {
+        if let Some(path) = doc.syntax.completion_import_path(offset) {
             let prefix = &doc.text[path.start..offset];
             let items = self
                 .available_import_targets(&doc)
@@ -106,286 +231,238 @@ impl Backend {
                 items: adapters::finish_import_completion_items(&doc, path, prefix, items),
             })));
         }
-        let prefix_token = offset
-            .checked_sub(1)
-            .and_then(|previous| syntax.token_at_or_before(previous))
-            .and_then(|id| syntax.token(id).map(|token| (id, token)))
-            .filter(|(_, token)| {
-                matches!(
-                    token.kind,
-                    analysis::TokenKind::Identifier | analysis::TokenKind::Number
-                ) && token.range.start <= offset
-                    && offset <= token.range.end
-            });
-        let replacement = prefix_token
-            .map_or(analysis::TextRange::new(offset, offset), |(_, token)| {
-                token.range
-            });
-        let prefix = &doc.text[replacement.start..offset];
-        let qualifier = completion_qualifier(&doc, replacement.start);
-        let pattern = syntax.case_pattern_type(offset);
-        let expected = pattern
-            .and_then(|pattern| pattern.explicit_type)
-            .and_then(|range| doc.text.get(range.start..range.end))
-            .and_then(|name| self.explicit_completion_type(&doc, name));
-        let items = if let Some((root, qualifier)) = qualifier {
-            if syntax
-                .symbol_for_token(root)
-                .and_then(|id| syntax.binding_by_id(id))
-                .is_some()
-            {
-                Vec::new()
-            } else {
-                self.qualified_context_completion_items(
-                    &doc,
-                    qualifier,
-                    prefix,
-                    pattern.is_some(),
-                    expected.as_ref(),
-                )
+        let typed = Typed::new(&doc.text, offset);
+        let pattern = doc.syntax.in_case_pattern(offset);
+        let before = self
+            .semantics_before(&uri, offset - typed.whole.len())
+            .await;
+        let whole = self.semantics(&uri).await;
+        let mut labels = HashSet::new();
+        let mut items = Vec::new();
+        if let Some(before) = &before {
+            if !pattern {
+                items.extend(local_items(before, &typed, &mut labels));
             }
-        } else if let Some(expected) = expected {
-            let mut items = analysis::typed_constructor_completion_items(
-                &expected.snapshot,
-                None,
-                prefix,
-                Some(&expected.name),
-            );
-            if let Some(alias) = expected.alias {
-                for item in &mut items {
-                    item.label = format!("{alias}.{}", item.label);
-                }
-            }
-            adapters::completion_items(items)
-        } else {
-            self.unqualified_completion_items(&doc, replacement.start, prefix, pattern.is_some())
-        };
+            items.extend(declaration_items(
+                before,
+                whole.as_deref(),
+                &typed,
+                pattern,
+                &mut labels,
+            ));
+        }
+        if !pattern {
+            items.extend(alias_items(&doc, &typed, &mut labels));
+            items.extend(keyword_items(&typed, &mut labels));
+        }
+        let locals: Option<HashSet<String>> = before
+            .as_ref()
+            .filter(|before| stopped_at_end(before))
+            .map(|before| before.scope.iter().map(|(name, _)| name.clone()).collect());
+        items.extend(
+            self.import_completion_items(&doc, &typed, pattern, locals.as_ref())
+                .await,
+        );
         Ok(Some(CompletionResponse::List(CompletionList {
             is_incomplete: discovery_incomplete,
-            items: adapters::finish_completion_items(&doc, replacement, prefix, items),
+            items: adapters::finish_completion_items(&doc, typed.range, typed.member, items),
         })))
     }
 
-    fn qualified_context_completion_items(
+    /// Declarations of other files, with the import that makes each visible.
+    /// Each import edit is checked once: the document must keep the meaning
+    /// of its names with it.
+    async fn import_completion_items(
         &self,
         doc: &Document,
-        qualifier: &str,
-        prefix: &str,
+        typed: &Typed<'_>,
         in_case_pattern: bool,
-        expected: Option<&ExplicitCompletionType>,
+        locals: Option<&HashSet<String>>,
     ) -> Vec<CompletionItem> {
-        let (alias, namespace) = qualifier
-            .split_once('.')
-            .map_or((qualifier, None), |(alias, rest)| (alias, Some(rest)));
-        if let Some(Module {
-            uri: source_uri,
-            snapshot: source,
-        }) = resolve::module(self, &doc.uri, doc, alias)
+        let prefix = typed.whole;
+        let mut planned: Vec<(CompletionItem, Option<TextEdit>)> = Vec::new();
         {
-            if in_case_pattern {
-                if expected.is_some_and(|target| target.uri != source_uri) {
-                    return Vec::new();
-                }
-                adapters::completion_items(analysis::typed_constructor_completion_items(
-                    &source,
-                    namespace,
-                    prefix,
-                    expected.map(|target| target.name.as_str()),
-                ))
-            } else {
-                adapters::completion_items(namespace.map_or_else(
-                    || analysis::module_completion_items(&source, prefix),
-                    |namespace| analysis::qualified_completion_items(&source, namespace, prefix),
-                ))
-            }
-        } else {
-            let source = expected
-                .map(|target| target.snapshot.clone())
-                .or_else(|| resolve::prelude(self, doc).map(|module| module.snapshot))
-                .unwrap_or_else(|| doc.snapshot.clone());
-            adapters::completion_items(if in_case_pattern {
-                analysis::typed_constructor_completion_items(
-                    &source,
-                    Some(qualifier),
-                    prefix,
-                    expected.map(|target| target.name.as_str()),
-                )
-            } else {
-                analysis::qualified_completion_items(&source, qualifier, prefix)
-            })
-        }
-    }
-
-    fn explicit_completion_type(
-        &self,
-        doc: &Document,
-        name: &str,
-    ) -> Option<ExplicitCompletionType> {
-        let has_type = |source: &analysis::DocumentSnapshot, name: &str| {
-            source
-                .syntax
-                .name_id(&source.text, name)
-                .and_then(|id| source.syntax.symbol_by_name(id))
-                .is_some_and(|symbol| symbol.kind == analysis::SymbolKind::Struct)
-        };
-        if has_type(doc, name) {
-            return Some(ExplicitCompletionType {
-                uri: doc.uri.clone(),
-                snapshot: doc.snapshot.clone(),
-                name: name.to_owned(),
-                alias: None,
+            let workspace = self.workspace.read();
+            let candidates =
+                workspace.import_completion_candidates(&doc.uri, prefix, in_case_pattern);
+            let base = self.compiler.base_module.read().clone().filter(|_| {
+                !doc.syntax
+                    .imports()
+                    .iter()
+                    .any(|import| import.path_text(&doc.text) == "Base")
             });
-        }
-        if let Some((alias, member)) = name.split_once('.')
-            && let Some(Module {
-                uri,
-                snapshot: source,
-            }) = resolve::module(self, &doc.uri, doc, alias)
-            && has_type(&source, member)
-        {
-            return Some(ExplicitCompletionType {
-                uri,
-                snapshot: source,
-                name: member.to_owned(),
-                alias: Some(alias.to_owned()),
-            });
-        }
-        let source = resolve::prelude(self, doc)?;
-        has_type(&source, name).then(|| ExplicitCompletionType {
-            uri: source.uri,
-            snapshot: source.snapshot,
-            name: name.to_owned(),
-            alias: None,
-        })
-    }
-
-    fn unqualified_completion_items(
-        &self,
-        doc: &Document,
-        prefix_start: usize,
-        prefix: &str,
-        in_case_pattern: bool,
-    ) -> Vec<CompletionItem> {
-        let mut items = adapters::completion_items(if in_case_pattern {
-            analysis::constructor_completion_items(doc, None, prefix)
-        } else {
-            analysis::scoped_completion_items(doc, prefix_start, prefix)
-        });
-        let mut labels: HashSet<String> = items.iter().map(|item| item.label.clone()).collect();
-        if let Some(module) = resolve::prelude(self, doc) {
-            items.extend(
-                adapters::completion_items(if in_case_pattern {
-                    analysis::constructor_completion_items(&module, None, prefix)
+            let base_candidates = base.map(|module| {
+                let completions = if in_case_pattern {
+                    analysis::constructor_completion_items(&module.snapshot, prefix)
                 } else {
-                    analysis::completion_items(&module, prefix)
-                })
-                .into_iter()
-                .filter(|item| labels.insert(item.label.clone())),
-            );
-        }
-        if !in_case_pattern {
-            for import in analysis::imports(doc) {
-                if let Some(alias) = import
-                    .alias_text(&doc.text)
-                    .filter(|alias| analysis::completion_match(alias, prefix).is_some())
-                    && labels.insert(alias.to_owned())
-                {
-                    let mut item = CompletionItem::new_simple(
-                        alias.to_owned(),
-                        format!("Imported module {}", import.path_text(&doc.text)),
-                    );
-                    item.kind = Some(CompletionItemKind::MODULE);
-                    items.push(item);
+                    analysis::module_completion_items(&module.snapshot, prefix)
+                };
+                (
+                    Document::with_snapshot(module.uri, "bend".into(), module.snapshot),
+                    "Base".to_owned(),
+                    completions,
+                )
+            });
+            for (target, path, completions) in candidates.into_iter().chain(base_candidates) {
+                for mut item in adapters::completion_items(completions) {
+                    let Some(plan) =
+                        auto_import_plan(doc, &workspace, &target.uri, &path, &item.label, locals)
+                    else {
+                        continue;
+                    };
+                    let insert = if typed.qualifier.is_empty() {
+                        plan.qualified_name
+                    } else if let Some(rest) = typed.label(&plan.qualified_name) {
+                        rest.clone_into(&mut item.label);
+                        rest.to_owned()
+                    } else {
+                        continue;
+                    };
+                    let detail = item.detail.get_or_insert_with(String::new);
+                    detail.push_str(" — from ");
+                    detail.push_str(&path);
+                    item.label_details = Some(CompletionItemLabelDetails {
+                        detail: None,
+                        description: Some(path.clone()),
+                    });
+                    item.insert_text = Some(insert);
+                    item.sort_text = adapters::completion_sort_text(&item, typed.member, true);
+                    planned.push((item, plan.import_edit));
                 }
             }
         }
-        self.append_import_completion_items(doc, prefix_start, prefix, in_case_pattern, &mut items);
-        items
-    }
-
-    fn append_import_completion_items(
-        &self,
-        doc: &Document,
-        offset: usize,
-        prefix: &str,
-        in_case_pattern: bool,
-        items: &mut Vec<CompletionItem>,
-    ) {
-        let workspace = self.workspace.read();
-        let candidates = workspace.import_completion_candidates(&doc.uri, prefix, in_case_pattern);
-        let base = self.compiler.base_module.read().clone().filter(|_| {
-            !doc.syntax
-                .imports()
-                .iter()
-                .any(|import| import.path_text(&doc.text) == "Base")
-        });
-        let base_candidates = base.map(|module| {
-            let completions = if in_case_pattern {
-                analysis::constructor_completion_items(&module.snapshot, None, prefix)
-            } else {
-                analysis::module_completion_items(&module.snapshot, prefix)
-            };
-            (
-                Document::with_snapshot(module.uri, "bend".into(), module.snapshot),
-                "Base".to_owned(),
-                completions,
-            )
-        });
-        for (target, path, completions) in candidates.into_iter().chain(base_candidates) {
-            for mut item in adapters::completion_items(completions) {
-                let Some(plan) =
-                    auto_import_plan(doc, &workspace, &target.uri, &path, &item.label, offset)
-                else {
-                    continue;
+        let mut verdicts: HashMap<String, bool> = HashMap::new();
+        let mut items = Vec::with_capacity(planned.len());
+        for (mut item, edit) in planned {
+            if let Some(edit) = &edit {
+                let key = format!("{:?}{}", edit.range, edit.new_text);
+                let keeps = if let Some(keeps) = verdicts.get(&key) {
+                    *keeps
+                } else {
+                    let range = adapters::text_range(doc, edit.range);
+                    let edits = [(range, edit.new_text.clone())];
+                    let keeps = self.import_keeps_meaning(&doc.uri, &edits).await;
+                    verdicts.insert(key, keeps);
+                    keeps
                 };
-                let detail = item.detail.get_or_insert_with(String::new);
-                detail.push_str(" — from ");
-                detail.push_str(&path);
-                item.label_details = Some(CompletionItemLabelDetails {
-                    detail: None,
-                    description: Some(path.clone()),
-                });
-                item.insert_text = Some(plan.qualified_name);
-                item.additional_text_edits = plan.import_edit.map(|edit| vec![edit]);
-                item.sort_text = adapters::completion_sort_text(&item, prefix, true);
-                items.push(item);
+                if !keeps {
+                    continue;
+                }
             }
+            item.additional_text_edits = edit.map(|edit| vec![edit]);
+            items.push(item);
         }
+        items
     }
 
     pub(in crate::server) async fn handle_signature_help(
         &self,
         params: SignatureHelpParams,
     ) -> Result<Option<SignatureHelp>> {
-        let _workspace_read = self
-            .document_read(&params.text_document_position_params.text_document.uri)
-            .await;
         let td = params.text_document_position_params;
-        let Some(doc) = self.document(&td.text_document.uri) else {
+        let uri = td.text_document.uri;
+        let _workspace_read = self.document_read_with_prelude(&uri).await;
+        let Some(doc) = self.document(&uri) else {
             return Ok(None);
         };
         if !Self::supported(&doc) {
             return Ok(None);
         }
-        Ok(
-            analysis::signature_help(&doc, adapters::offset_at(&doc, td.position))
-                .map(adapters::signature_help),
-        )
+        let offset = adapters::offset_at(&doc, td.position);
+        let Some((_, active, _, callee)) = doc.syntax.active_call(&doc.text, offset) else {
+            return Ok(None);
+        };
+        let Some(head) = doc.syntax.token(callee).map(|token| token.range) else {
+            return Ok(None);
+        };
+        let Some(before) = self.semantics_before(&uri, offset).await else {
+            return Ok(None);
+        };
+        let Some(declaration) = callee_declaration(&before, head.start) else {
+            return Ok(None);
+        };
+        let parameters: Vec<String> = declaration
+            .parameters
+            .iter()
+            .map(|(name, ty)| {
+                ty.as_ref()
+                    .map_or_else(|| name.clone(), |ty| format!("{name}: {ty}"))
+            })
+            .collect();
+        let active = usize::try_from(active).unwrap_or(usize::MAX);
+        Ok(Some(adapters::signature_help(analysis::SignatureHelp {
+            label: declaration.detail.clone(),
+            active_parameter: active.min(parameters.len().saturating_sub(1)),
+            parameters,
+        })))
     }
 
     pub(in crate::server) async fn handle_inlay_hint(
         &self,
         params: InlayHintParams,
     ) -> Result<Option<Vec<InlayHint>>> {
-        let _workspace_read = self.document_read(&params.text_document.uri).await;
-        let Some(doc) = self.document(&params.text_document.uri) else {
+        let uri = params.text_document.uri;
+        let _workspace_read = self.document_read_with_prelude(&uri).await;
+        let Some(doc) = self.document(&uri) else {
             return Ok(None);
         };
         if !Self::supported(&doc) {
             return Ok(None);
         }
+        let Some(semantics) = self.semantics(&uri).await else {
+            return Ok(None);
+        };
         let range = adapters::text_range(&doc, params.range);
-        let hints = analysis::inlay_hints(&doc, range);
-        Ok(Some(adapters::inlay_hints(&doc, hints)))
+        let mut hints = Vec::new();
+        for call in doc.syntax.calls() {
+            if call.call_range.end < range.start || range.end < call.call_range.start {
+                continue;
+            }
+            let Some(declaration) = callee_declaration(&semantics, call.callee_range.start) else {
+                continue;
+            };
+            let arguments = doc.syntax.call_arguments(call);
+            let templated = arguments
+                .first()
+                .and_then(|argument| doc.text.get(argument.start..argument.end))
+                .is_some_and(|text| text.trim_start().starts_with('~'));
+            let skip = if templated { 0 } else { declaration.templates };
+            let names = declaration.parameters.iter().skip(skip);
+            for (argument, (name, _)) in arguments.iter().zip(names) {
+                if !range.contains(argument.start) {
+                    continue;
+                }
+                hints.push(InlayHint {
+                    position: adapters::position_at(&doc, argument.start),
+                    label: InlayHintLabel::String(format!("{name}: ")),
+                    kind: Some(InlayHintKind::PARAMETER),
+                    text_edits: None,
+                    tooltip: None,
+                    padding_left: None,
+                    padding_right: None,
+                    data: None,
+                });
+            }
+        }
+        hints.sort_by_key(|hint| (hint.position.line, hint.position.character));
+        Ok(Some(hints))
     }
+}
+
+/// The def or law that the name starting at `offset` calls.
+fn callee_declaration(semantics: &Semantics, offset: usize) -> Option<&Declaration> {
+    let entry = semantics.entry()?;
+    let name = entry
+        .names
+        .iter()
+        .find(|name| !name.implicit && name.range.start == offset)?;
+    let Target::Global(identity) = semantics.target(name) else {
+        return None;
+    };
+    semantics.declaration(&identity).filter(|declaration| {
+        matches!(
+            declaration.kind,
+            DeclarationKind::Def | DeclarationKind::Law
+        )
+    })
 }

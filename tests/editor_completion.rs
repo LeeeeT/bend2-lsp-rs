@@ -178,7 +178,7 @@ mod protocol {
     #[test]
     fn fuzzy_ranking_and_lexical_shadowing_are_deterministic() {
         let mut editor = Editor::new(
-            "def add:\n  1\ndef alpha_delta:\n  2\ndef main(ad, adder):\n  ad",
+            "def add() -> U32:\n  1\ndef alpha_delta() -> U32:\n  2\ndef main(ad, adder) -> U32:\n  ad",
             None,
         );
         let first = editor.complete("\n  ad");
@@ -192,7 +192,7 @@ mod protocol {
         };
         assert!(index("adder") < index("add"));
         assert!(index("add") < index("alpha_delta"));
-        editor.replace("def add:\n  1\ndef main(add):\n  ad");
+        editor.replace("def add() -> U32:\n  1\ndef main(add) -> U32:\n  ad");
         let shadowed = editor.complete("\n  ad");
         assert_eq!(item(&shadowed, "add")["kind"], 6);
         assert_eq!(
@@ -207,7 +207,7 @@ mod protocol {
 
     #[test]
     fn utf16_middle_token_edit_preserves_expression_suffix() {
-        let source = "def add(x):\n  x\ndef main:\n  \"😀\"; adzz(1)\n";
+        let source = "def add(x) -> U32:\n  x\ndef main() -> U32:\n  \"😀\"; adzz(1)\n";
         let mut editor = Editor::new(source, None);
         let items = editor.complete("\"😀\"; ad");
         let add = item(&items, "add");
@@ -217,32 +217,38 @@ mod protocol {
         );
         assert_eq!(
             apply(source, add),
-            "def add(x):\n  x\ndef main:\n  \"😀\"; add(1)\n"
+            "def add(x) -> U32:\n  x\ndef main() -> U32:\n  \"😀\"; add(1)\n"
         );
         editor.finish();
     }
 
     #[test]
     fn qualified_subsequence_edits_preserve_alias_and_suffix() {
-        let source = "import tools.bend as Tools\ndef main:\n  Tools.apdzz(1)\n";
-        let mut editor = Editor::new(source, Some("def append(x):\n  x\n"));
+        let source = "import tools.bend as Tools\ndef main() -> U32:\n  Tools.apdzz(1)\n";
+        let mut editor = Editor::new(source, Some("def append(x) -> U32:\n  x\n"));
         let items = editor.complete("Tools.apd");
         assert_eq!(
             apply(source, item(&items, "append")),
-            "import tools.bend as Tools\ndef main:\n  Tools.append(1)\n"
+            "import tools.bend as Tools\ndef main() -> U32:\n  Tools.append(1)\n"
         );
-        editor.replace("import tools.bend as Tools\ndef main:\n  Tls");
+        editor.replace("import tools.bend as Tools\ndef main() -> U32:\n  Tls");
         assert_eq!(item(&editor.complete("\n  Tls"), "Tools")["kind"], 9);
-        editor.replace("import tools.bend as Tools\ndef main(Tools):\n  Tools.ap");
-        assert!(editor.complete("Tools.ap").is_empty());
+        editor.replace("import tools.bend as Tools\ndef main(Tools) -> U32:\n  Tools.ap");
+        let beside_local = editor.complete("Tools.ap");
+        assert_eq!(
+            item(&beside_local, "append")["kind"],
+            3,
+            "a local never hides a qualified name"
+        );
         editor.finish();
     }
 
     #[test]
-    fn explicit_types_filter_nested_patterns_but_unknown_types_keep_candidates() {
+    fn case_patterns_offer_every_constructor_and_nothing_else() {
         let declarations = "type Shape is Data:\n  Circle{}\ntype Other is Data:\n  Square{}\ntype Wrapped is Data:\n  Box{value: Shape}\n";
-        let source =
-            format!("{declarations}def main(value: Wrapped):\n  match value:\n    case Box{{Ci");
+        let source = format!(
+            "{declarations}def main(value: Wrapped) -> U32:\n  match value:\n    case Box{{Ci"
+        );
         let mut editor = Editor::new(&source, None);
         let nested = editor.complete("case Box{Ci");
         assert_eq!(item(&nested, "Circle")["kind"], 4);
@@ -252,34 +258,34 @@ mod protocol {
                 || item["kind"] == 14)
         );
         editor.replace(&format!(
-            "{declarations}def main(value: Wrapped):\n  match value:\n    case Box{{\n      Ci"
+            "{declarations}def main(value: Wrapped) -> U32:\n  match value:\n    case Box{{\n      Ci"
         ));
         assert_eq!(item(&editor.complete("\n      Ci"), "Circle")["kind"], 4);
         editor.replace(&format!(
-            "{declarations}def main(value: Shape):\n  match value:\n    case "
+            "{declarations}def main(value: Shape) -> U32:\n  match value:\n    case "
         ));
-        let known = editor.complete("case ");
-        assert!(known.iter().any(|item| item["label"] == "Circle"));
-        assert!(!known.iter().any(|item| item["label"] == "Square"));
-        editor.replace(&format!(
-            "{declarations}def main(value: Mystery):\n  match value:\n    case "
-        ));
-        let unknown = editor.complete("case ");
-        assert!(unknown.iter().any(|item| item["label"] == "Circle"));
-        assert!(unknown.iter().any(|item| item["label"] == "Square"));
+        let head = editor.complete("case ");
+        for constructor in ["Circle", "Square", "Box"] {
+            assert_eq!(
+                item(&head, constructor)["kind"],
+                4,
+                "the type checker, not completion, matches constructors to the scrutinee"
+            );
+        }
+        assert!(head.iter().all(|item| item["kind"] == 4));
         editor.finish();
     }
 
     #[test]
     fn unsaved_eof_rebuilds_nested_context_and_expression_context() {
-        let mut editor = Editor::new("def old:\n  0\n", None);
+        let mut editor = Editor::new("def old() -> U32:\n  0\n", None);
         editor.replace(
-            "type Tree is Data:\n  Leaf{}\ndef newest(value):\n  match value:\n    case Wrapper(Le",
+            "type Tree is Data:\n  Leaf{}\ndef newest(value) -> U32:\n  match value:\n    case Wrapper(Le",
         );
         let pattern = editor.complete("Wrapper(Le");
         assert_eq!(item(&pattern, "Leaf")["kind"], 4);
         assert!(!pattern.iter().any(|item| item["label"] == "newest"));
-        editor.replace("def newest:\n  1\ndef main:\n  nw");
+        editor.replace("def newest() -> U32:\n  1\ndef main() -> U32:\n  nw");
         assert_eq!(item(&editor.complete("\n  nw"), "newest")["kind"], 3);
         editor.finish();
     }
@@ -293,13 +299,13 @@ mod protocol {
         );
         let target = editor.temp.path().join("local.bend");
         let uri = Url::from_file_path(&target).must_be("indexed target URI");
-        editor.client.notify("textDocument/didOpen", json!({"textDocument":{"uri":uri,"languageId":"bend","version":1,"text":"def local:\n  1\n"}}));
-        editor.replace("import lcl as Local\ndef main:\n  1\n");
+        editor.client.notify("textDocument/didOpen", json!({"textDocument":{"uri":uri,"languageId":"bend","version":1,"text":"def local() -> U32:\n  1\n"}}));
+        editor.replace("import lcl as Local\ndef main() -> U32:\n  1\n");
         let items = editor.complete("import lcl");
         let local = item(&items, "local.bend");
         assert_eq!(
             apply(&editor.source, local),
-            "import local.bend as Local\ndef main:\n  1\n"
+            "import local.bend as Local\ndef main() -> U32:\n  1\n"
         );
         assert!(
             !Path::new(&target).exists(),
@@ -311,7 +317,7 @@ mod protocol {
     #[test]
     fn import_acceptance_replaces_middle_path_and_preserves_explicit_alias() {
         let source = "# header 😀\nimport toOLD.bend as UserChosen # keep me\r\n";
-        let mut editor = Editor::new(source, Some("def value:\n  1\n"));
+        let mut editor = Editor::new(source, Some("def value() -> U32:\n  1\n"));
         let items = editor.complete("import to");
         assert_eq!(
             apply(source, item(&items, "tools.bend")),
@@ -347,7 +353,7 @@ mod protocol {
             editor.client.notify(
                 "textDocument/didOpen",
                 json!({"textDocument":{
-                    "uri":uri,"languageId":"bend","version":1,"text":"def value:\n  1\n"
+                    "uri":uri,"languageId":"bend","version":1,"text":"def value() -> U32:\n  1\n"
                 }}),
             );
             editor.client.request(
@@ -394,7 +400,7 @@ mod protocol {
             let uri = Url::from_file_path(editor.temp.path().join(path)).must_be("target URI");
             editor.client.notify(
                 "textDocument/didOpen",
-                json!({"textDocument":{"uri":uri,"languageId":"bend","version":1,"text":"def exported:\n  1\n"}}),
+                json!({"textDocument":{"uri":uri,"languageId":"bend","version":1,"text":"def exported() -> U32:\n  1\n"}}),
             );
             editor.client.request(
                 "textDocument/documentSymbol",
@@ -438,8 +444,8 @@ mod protocol {
 
     #[test]
     fn import_acceptance_avoids_declarations_bindings_aliases_and_unicode_fallback_collisions() {
-        let source = "import other.bend as Tools\nimport toOLD.bend\ndef Tools2:\n  1\ndef Tools3.member:\n  2\ndef main(Tools4):\n  Tools5\n";
-        let mut editor = Editor::new(source, Some("def value:\n  1\n"));
+        let source = "import other.bend as Tools\nimport toOLD.bend\ndef Tools2() -> U32:\n  1\ndef Tools3.member() -> U32:\n  2\ndef main(Tools4) -> U32:\n  Tools5\n";
+        let mut editor = Editor::new(source, Some("def value() -> U32:\n  1\n"));
         let items = editor.complete("\nimport to");
         let edited = apply(source, item(&items, "tools.bend"));
         assert!(
@@ -451,18 +457,18 @@ mod protocol {
         editor.client.notify(
             "textDocument/didOpen",
             json!({"textDocument":{
-                "uri":unicode,"languageId":"bend","version":1,"text":"def value:\n  1\n"
+                "uri":unicode,"languageId":"bend","version":1,"text":"def value() -> U32:\n  1\n"
             }}),
         );
         editor.client.request(
             "textDocument/documentSymbol",
             json!({"textDocument":{"uri":unicode}}),
         );
-        editor.replace("import \ndef Module:\n  1\ndef Module2:\n  2\n");
+        editor.replace("import \ndef Module() -> U32:\n  1\ndef Module2() -> U32:\n  2\n");
         let items = editor.complete("import ");
         assert_eq!(
             apply(&editor.source, item(&items, "工具.bend")),
-            "import 工具.bend as Module3\ndef Module:\n  1\ndef Module2:\n  2\n"
+            "import 工具.bend as Module3\ndef Module() -> U32:\n  1\ndef Module2() -> U32:\n  2\n"
         );
         editor.finish();
     }
@@ -478,7 +484,7 @@ mod protocol {
             let uri = Url::from_file_path(editor.temp.path().join(path)).must_be("target URI");
             editor.client.notify(
                 "textDocument/didOpen",
-                json!({"textDocument":{"uri":uri,"languageId":"bend","version":1,"text":"def exported:\n  1\n"}}),
+                json!({"textDocument":{"uri":uri,"languageId":"bend","version":1,"text":"def exported() -> U32:\n  1\n"}}),
             );
             editor.client.request(
                 "textDocument/documentSymbol",
@@ -529,7 +535,7 @@ mod protocol {
     #[test]
     fn import_acceptance_reuses_existing_namespace_for_relative_spelling() {
         let source = "import ./tools.bend as Existing\nimport toOLD.bend # repeated\n";
-        let mut editor = Editor::new(source, Some("def value:\n  1\n"));
+        let mut editor = Editor::new(source, Some("def value() -> U32:\n  1\n"));
         let items = editor.complete("\nimport to");
         assert_eq!(
             apply(source, item(&items, "tools.bend")),
@@ -545,7 +551,7 @@ mod protocol {
             .must_be("target URI");
         editor.client.notify(
             "textDocument/didOpen",
-            json!({"textDocument":{"uri":uri,"languageId":"bend","version":1,"text":"def exported:\n  1\n"}}),
+            json!({"textDocument":{"uri":uri,"languageId":"bend","version":1,"text":"def exported() -> U32:\n  1\n"}}),
         );
         editor.client.request(
             "textDocument/documentSymbol",
@@ -553,8 +559,8 @@ mod protocol {
         );
         for source in [
             "# import nested/",
-            "def main:\n  \"nested/\"",
-            "def main:\n  1 /",
+            "def main() -> U32:\n  \"nested/\"",
+            "def main() -> U32:\n  1 /",
         ] {
             editor.replace(source);
             let marker = if source.contains('\"') {
@@ -588,8 +594,11 @@ mod protocol {
         let mut editor = Editor::with_setup(&source, None, |root| {
             let directory = root.join("library").join(package);
             fs::create_dir_all(&directory).must_be("package cache");
-            fs::write(directory.join("library.bend"), "def cached:\n  1\n")
-                .must_be("cached source");
+            fs::write(
+                directory.join("library.bend"),
+                "def cached() -> U32:\n  1\n",
+            )
+            .must_be("cached source");
         });
         let label = format!("{package}/library.bend");
         let items = editor.complete(&format!("\nimport {package}/li"));
@@ -611,10 +620,10 @@ mod protocol {
 
     #[test]
     fn indexed_candidates_distinguish_modules_rank_scope_first_and_avoid_alias_collisions() {
-        let source = "def value_local:\n  0\ndef main(Tools):\n  value\n";
+        let source = "def value_local() -> U32:\n  0\ndef main(Tools) -> U32:\n  value\n";
         let mut editor = Editor::new(source, None);
-        let tools = editor.index_unsaved("tools.bend", "def value:\n  1\n");
-        editor.index_unsaved("other.bend", "def value:\n  2\n");
+        let tools = editor.index_unsaved("tools.bend", "def value() -> U32:\n  1\n");
+        editor.index_unsaved("other.bend", "def value() -> U32:\n  2\n");
         let offered = editor.complete("\n  value");
         assert_eq!(offered[0]["label"], "value_local");
         let tools_item = imported_item(&offered, "value", "./tools.bend");
@@ -630,7 +639,7 @@ mod protocol {
         let accepted = apply(source, tools_item);
         assert_eq!(
             accepted,
-            "import ./tools.bend as Tools2\ndef value_local:\n  0\ndef main(Tools):\n  Tools2.value\n"
+            "import ./tools.bend as Tools2\ndef value_local() -> U32:\n  0\ndef main(Tools) -> U32:\n  Tools2.value\n"
         );
         editor.replace(&accepted);
         let offset = accepted.rfind("value").must_be("accepted member");
@@ -646,17 +655,17 @@ mod protocol {
 
     #[test]
     fn existing_alias_and_repeat_acceptance_use_latest_unsaved_imports_without_duplicates() {
-        let source = "import tools.bend as Kit\ndef main:\n  val\n";
-        let mut editor = Editor::new(source, Some("def value:\n  1\n"));
+        let source = "import tools.bend as Kit\ndef main() -> U32:\n  val\n";
+        let mut editor = Editor::new(source, Some("def value() -> U32:\n  1\n"));
         let offered = editor.complete("\n  val");
         let value = imported_item(&offered, "value", "./tools.bend");
         assert!(value["additionalTextEdits"].is_null());
         assert_eq!(
             apply(source, value),
-            "import tools.bend as Kit\ndef main:\n  Kit.value\n"
+            "import tools.bend as Kit\ndef main() -> U32:\n  Kit.value\n"
         );
         // The alias change exists only in the editor, not in the saved file.
-        editor.replace("import tools.bend as Unsaved\ndef main:\n  val\n");
+        editor.replace("import tools.bend as Unsaved\ndef main() -> U32:\n  val\n");
         let offered = editor.complete("\n  val");
         let first = apply(
             &editor.source,
@@ -664,7 +673,7 @@ mod protocol {
         );
         assert_eq!(
             first,
-            "import tools.bend as Unsaved\ndef main:\n  Unsaved.value\n"
+            "import tools.bend as Unsaved\ndef main() -> U32:\n  Unsaved.value\n"
         );
         editor.replace(&format!("{first}  val\n"));
         let offered = editor.complete("\n  val");
@@ -674,7 +683,7 @@ mod protocol {
         );
         assert_eq!(
             second,
-            "import tools.bend as Unsaved\ndef main:\n  Unsaved.value\n  Unsaved.value\n"
+            "import tools.bend as Unsaved\ndef main() -> U32:\n  Unsaved.value\n  Unsaved.value\n"
         );
         assert_eq!(
             fs::read_to_string(editor.temp.path().join("main.bend")).must_be("saved source"),
@@ -685,13 +694,13 @@ mod protocol {
 
     #[test]
     fn browsing_is_read_only_and_completion_matches_missing_import_quickfix() {
-        let disk = "def main:\n  old\n";
-        let source = "def main:\n  \"😀\"; value(1)\n";
+        let disk = "def main() -> U32:\n  old\n";
+        let source = "def main() -> U32:\n  (\"😀\", value(1))\n";
         let mut editor = Editor::new(disk, None);
-        editor.index_unsaved("tools.bend", "def value(x):\n  x\n");
+        editor.index_unsaved("tools.bend", "def value(x) -> U32:\n  x\n");
         editor.replace(source);
-        let offered = editor.complete("\"😀\"; value");
-        assert_eq!(offered, editor.complete("\"😀\"; value"));
+        let offered = editor.complete("\"😀\", value");
+        assert_eq!(offered, editor.complete("\"😀\", value"));
         assert_eq!(editor.source, source);
         assert_eq!(
             fs::read_to_string(editor.temp.path().join("main.bend")).must_be("saved source"),
@@ -724,7 +733,7 @@ mod protocol {
         assert_eq!(apply(source, value), apply(source, &synthetic_completion));
         assert_eq!(
             apply(source, value),
-            "import ./tools.bend as Tools\ndef main:\n  \"😀\"; Tools.value(1)\n"
+            "import ./tools.bend as Tools\ndef main() -> U32:\n  (\"😀\", Tools.value(1))\n"
         );
         editor.finish();
     }
@@ -732,7 +741,7 @@ mod protocol {
     #[test]
     fn auto_import_at_replacement_boundary_is_one_nonoverlapping_primary_edit() {
         let mut editor = Editor::new("valzz", None);
-        editor.index_unsaved("tools.bend", "def value:\n  1\n");
+        editor.index_unsaved("tools.bend", "def value() -> U32:\n  1\n");
         let offered = editor.complete("val");
         let value = imported_item(&offered, "value", "./tools.bend");
         assert_eq!(
@@ -744,13 +753,13 @@ mod protocol {
     }
     #[test]
     fn auto_import_completion_waits_for_a_new_unopened_watched_source() {
-        let source = "def main:\n  project_can\n";
+        let source = "def main() -> U32:\n  project_can\n";
         let mut editor = Editor::new(source, None);
         editor
             .client
             .request("workspace/symbol", json!({"query":"main"}));
         let path = editor.temp.path().join("library.bend");
-        let mut library = "def project_candidate:\n  1\n".to_owned();
+        let mut library = "def project_candidate() -> U32:\n  1\n".to_owned();
         library.push_str(&"# unrelated source lines\n".repeat(40_000));
         fs::write(&path, library).must_be("write unopened library");
         let uri = Url::from_file_path(&path).must_be("library URI");
@@ -764,7 +773,7 @@ mod protocol {
         let candidate = imported_item(&offered, "project_candidate", "./library.bend");
         assert_eq!(
             apply(source, candidate),
-            "import ./library.bend as Library\ndef main:\n  Library.project_candidate\n"
+            "import ./library.bend as Library\ndef main() -> U32:\n  Library.project_candidate\n"
         );
         assert_eq!(
             fs::read_to_string(editor.temp.path().join("main.bend")).must_be("disk source"),
@@ -775,33 +784,34 @@ mod protocol {
 
     #[test]
     fn unsaved_candidate_revisions_and_middle_token_suffix_respect_discovery_exclusions() {
-        let mut editor = Editor::with_setup("def main:\n  old\n", None, |root| {
+        let mut editor = Editor::with_setup("def main() -> U32:\n  old\n", None, |root| {
             fs::write(root.join(".gitignore"), "hidden.bend\n").must_be("exclude disk candidate");
-            fs::write(root.join("hidden.bend"), "def newest:\n  9\n").must_be("unindexed source");
+            fs::write(root.join("hidden.bend"), "def newest() -> U32:\n  9\n")
+                .must_be("unindexed source");
         });
-        let uri = editor.index_unsaved("tools.bend", "def stale:\n  0\n");
+        let uri = editor.index_unsaved("tools.bend", "def stale() -> U32:\n  0\n");
         editor.client.notify(
             "textDocument/didChange",
             json!({"textDocument":{"uri":uri,"version":2},
-                "contentChanges":[{"text":"def newest:\n  1\n"}]}),
+                "contentChanges":[{"text":"def newest() -> U32:\n  1\n"}]}),
         );
         editor.client.request(
             "textDocument/documentSymbol",
             json!({"textDocument":{"uri":uri}}),
         );
-        editor.replace("def main:\n  \"😀\"; nwzz(1)\n");
+        editor.replace("def main() -> U32:\n  \"😀\"; nwzz(1)\n");
         let offered = editor.complete("\"😀\"; nw");
         let newest = imported_item(&offered, "newest", "./tools.bend");
         assert_eq!(
             apply(&editor.source, newest),
-            "import ./tools.bend as Tools\ndef main:\n  \"😀\"; Tools.newest(1)\n"
+            "import ./tools.bend as Tools\ndef main() -> U32:\n  \"😀\"; Tools.newest(1)\n"
         );
         assert!(
             !offered
                 .iter()
                 .any(|item| { item["labelDetails"]["description"] == "./hidden.bend" })
         );
-        editor.replace("def main:\n  stale\n");
+        editor.replace("def main() -> U32:\n  stale\n");
         assert!(!editor.complete("\n  stale").iter().any(|item| {
             item["label"] == "stale" && item["labelDetails"]["description"] == "./tools.bend"
         }));
@@ -811,19 +821,19 @@ mod protocol {
     #[test]
     fn indexed_external_constructors_keep_unknown_pattern_candidates_constructor_only() {
         let mut editor = Editor::new(
-            "def main(value: Mystery):\n  match value:\n    case Ci",
+            "def main(value: Mystery) -> U32:\n  match value:\n    case Ci",
             None,
         );
         editor.index_unsaved(
             "shapes.bend",
-            "type Shape is Data:\n  Circle{}\ndef CircleFactory:\n  1\n",
+            "type Shape is Data:\n  Circle{}\ndef CircleFactory() -> U32:\n  1\n",
         );
         let offered = editor.complete("case Ci");
         let circle = imported_item(&offered, "Circle", "./shapes.bend");
         assert_eq!(circle["kind"], 4);
         assert_eq!(
             apply(&editor.source, circle),
-            "import ./shapes.bend as Shapes\ndef main(value: Mystery):\n  match value:\n    case Shapes.Circle"
+            "import ./shapes.bend as Shapes\ndef main(value: Mystery) -> U32:\n  match value:\n    case Shapes.Circle"
         );
         assert!(!offered.iter().any(|item| item["label"] == "CircleFactory"));
         editor.finish();
@@ -831,9 +841,9 @@ mod protocol {
 
     #[test]
     fn already_loaded_base_candidates_add_bare_base_import_only_on_acceptance() {
-        let mut editor = Editor::new("def main:\n  builtin\n", None);
+        let mut editor = Editor::new("def main() -> U32:\n  builtin\n", None);
         let compiler = editor.temp.path().join("compiler-fixture");
-        fs::write(&compiler, "#!/bin/sh\ncase \"$1\" in\nversion) printf 'Bend test\\n';;\n--help) printf 'Bend\\nusage: bend <file> --check-only\\nbend base\\n';;\nbase) printf 'def builtin: U32\\n  1\\n';;\nesac\nexit 0\n")
+        fs::write(&compiler, "#!/bin/sh\ncase \"$1\" in\nversion) printf 'Bend test\\n';;\n--help) printf 'Bend\\nusage: bend <file> --check-only\\nbend base\\n';;\nbase) printf 'def builtin() -> U32:\\n  1\\n';;\nesac\nexit 0\n")
             .must_be("compiler fixture");
         fs::set_permissions(&compiler, fs::Permissions::from_mode(0o755))
             .must_be("compiler fixture permissions");
@@ -841,20 +851,20 @@ mod protocol {
             "workspace/didChangeConfiguration",
             json!({"settings":{"bend2-lsp":{"compilerPath":compiler}}}),
         );
-        editor.replace("import Base\ndef main:\n  builtin\n");
+        editor.replace("import Base\ndef main() -> U32:\n  builtin\n");
         assert_eq!(item(&editor.complete("\n  builtin"), "builtin")["kind"], 3);
-        editor.replace("def main:\n  builtin\n");
+        editor.replace("def main() -> U32:\n  builtin\n");
         let offered = editor.complete("\n  builtin");
         let builtin = imported_item(&offered, "builtin", "Base");
         let accepted = apply(&editor.source, builtin);
-        assert_eq!(accepted, "import Base\ndef main:\n  builtin\n");
+        assert_eq!(accepted, "import Base\ndef main() -> U32:\n  builtin\n");
         editor.replace(&accepted);
         let offered = editor.complete("\n  builtin");
         assert!(item(&offered, "builtin")["additionalTextEdits"].is_null());
         assert!(!offered.iter().any(|item| {
             item["label"] == "builtin" && item["labelDetails"]["description"] == "Base"
         }));
-        editor.replace("def main(builtin):\n  builtin\n");
+        editor.replace("def main(builtin) -> U32:\n  builtin\n");
         let offered = editor.complete("\n  builtin");
         assert_eq!(item(&offered, "builtin")["kind"], 6);
         assert!(!offered.iter().any(|item| {
@@ -864,15 +874,22 @@ mod protocol {
     }
 
     #[test]
-    fn unavailable_existing_alias_does_not_create_duplicate_or_namespace_changing_imports() {
+    fn existing_alias_beside_a_same_named_local_needs_no_new_import() {
         let mut editor = Editor::new(
-            "import tools.bend as Kit\ndef main(Kit):\n  value\n",
-            Some("def value:\n  1\n"),
+            "import tools.bend as Kit\ndef main(Kit) -> U32:\n  value\n",
+            Some("def value() -> U32:\n  1\n"),
         );
-        assert!(!editor.complete("\n  value").iter().any(|item| {
-            item["label"] == "value" && item["labelDetails"]["description"] == "./tools.bend"
-        }));
-        editor.replace("import tools.bend\ndef main:\n  value\n");
+        let offered = editor.complete("\n  value");
+        let value = imported_item(&offered, "value", "./tools.bend");
+        assert_eq!(
+            value["textEdit"]["newText"], "Kit.value",
+            "a local never hides a qualified name"
+        );
+        assert!(
+            value["additionalTextEdits"].is_null(),
+            "the module is imported"
+        );
+        editor.replace("import tools.bend\ndef main() -> U32:\n  value\n");
         assert!(!editor.complete("\n  value").iter().any(|item| {
             item["label"] == "value" && item["labelDetails"]["description"] == "./tools.bend"
         }));

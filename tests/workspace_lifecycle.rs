@@ -15,10 +15,10 @@ use support::Must;
 use tempfile::tempdir;
 use url::Url;
 
-const IMPORT: &str = "import ./dep.bend as Dep\ndef main: U32\n  Dep.value\n";
-const CLEAN: &str = "def main: U32\n  0\n";
-const DISK: &str = "def value: U32\n  1\n";
-const UPDATED: &str = "def value: U32\n  2\n";
+const IMPORT: &str = "import ./dep.bend as Dep\ndef main() -> U32:\n  Dep.value\n";
+const CLEAN: &str = "def main() -> U32:\n  0\n";
+const DISK: &str = "def value() -> U32:\n  1\n";
+const UPDATED: &str = "def value() -> U32:\n  2\n";
 
 fn uri(path: &Path) -> Url {
     Url::from_file_path(path).must_be("file URI")
@@ -156,7 +156,7 @@ fn reimport_during_unfinished_load_discards_retired_disk_and_import_edges() {
     let old_target = temp.path().join("old_target.bend");
     fs::write(
         &dep,
-        "import ./old_target.bend as Old\ndef value: U32\n  Old.value\n",
+        "import ./old_target.bend as Old\ndef value() -> U32:\n  Old.value\n",
     )
     .must_be("write original dependency");
     fs::write(&old_target, DISK).must_be("write old transitive dependency");
@@ -209,15 +209,15 @@ fn unreachable_import_cycle_releases_both_payloads_and_reverse_links() {
     let root = temp.path().join("main.bend");
     let a = temp.path().join("a.bend");
     let b = temp.path().join("b.bend");
-    fs::write(&a, "import ./b.bend as B\ndef value: U32\n  B.value\n")
+    fs::write(&a, "import ./b.bend as B\ndef value() -> U32:\n  B.value\n")
         .must_be("write cycle member A");
-    fs::write(&b, "import ./a.bend as A\ndef value: U32\n  A.value\n")
+    fs::write(&b, "import ./a.bend as A\ndef value() -> U32:\n  A.value\n")
         .must_be("write cycle member B");
     let mut db = WorkspaceDb::default();
     open(
         &mut db,
         &root,
-        "import ./a.bend as A\ndef main: U32\n  A.value\n",
+        "import ./a.bend as A\ndef main() -> U32:\n  A.value\n",
     );
     let a_id = db.file_id_by_path(&a).must_be("A identity");
     let b_id = db.file_id_by_path(&b).must_be("B identity");
@@ -280,7 +280,7 @@ fn closing_unsaved_dependency_overlay_reloads_fresh_disk_for_open_importer() {
     open(
         &mut db,
         &dep,
-        "import ./overlay_only.bend as Overlay\ndef value: U32\n  Overlay.value\n",
+        "import ./overlay_only.bend as Overlay\ndef value() -> U32:\n  Overlay.value\n",
     );
     let overlay_weak = Arc::downgrade(&db.open_document(&uri(&dep)).must_be("overlay").snapshot);
     let orphan_weak = Arc::downgrade(
@@ -323,7 +323,7 @@ fn dependents_preserve_terminal_frontiers_diamonds_and_cycles_across_updates() {
     let outer = temp.path().join("outer.bend");
     fs::write(&common, DISK).must_be("write shared dependency");
     let mut db = WorkspaceDb::default();
-    let source = "import ./common.bend as Common\ndef value: U32\n  Common.value\n";
+    let source = "import ./common.bend as Common\ndef value() -> U32:\n  Common.value\n";
     open(&mut db, &left, source);
     open(&mut db, &right, source);
     let common_id = db.file_id_by_path(&common).must_be("shared file identity");
@@ -343,7 +343,7 @@ fn dependents_preserve_terminal_frontiers_diamonds_and_cycles_across_updates() {
     open(
         &mut db,
         &outer,
-        "import ./left.bend as Left\nimport ./right.bend as Right\ndef value: U32\n  Left.value\n",
+        "import ./left.bend as Left\nimport ./right.bend as Right\ndef value() -> U32:\n  Left.value\n",
     );
     expected.push(uri(&outer));
     expected.sort_unstable();
@@ -352,7 +352,7 @@ fn dependents_preserve_terminal_frontiers_diamonds_and_cycles_across_updates() {
     open(
         &mut db,
         &common,
-        "import ./common.bend as Self\nimport ./left.bend as Left\ndef value: U32\n  1\n",
+        "import ./common.bend as Self\nimport ./left.bend as Left\ndef value() -> U32:\n  1\n",
     );
     assert_eq!(dependent_uris(&db), expected);
 }
@@ -390,7 +390,7 @@ impl LifecycleFixture {
                 writeln!(source, "import ./file_{target}.bend as Child{target}")
                     .must_be("format bounded import tree");
             }
-            write!(source, "def stress_file_{index}: U32\n  0\n")
+            write!(source, "def stress_file_{index}() -> U32:\n  0\n")
                 .must_be("format fixture declaration");
             fs::write(&path, &source).must_be("write lifecycle fixture once");
             uris.push(uri(&path));
@@ -428,7 +428,7 @@ fn reindex_stress_overlays(
     replace(
         db,
         &fixture.paths[0],
-        &fixture.sources[0].replace("stress_file_0:", "stress_reindexed_root:"),
+        &fixture.sources[0].replace("stress_file_0()", "stress_reindexed_root()"),
     );
     snapshots.push(payload_weak(db, &fixture.uris[0]));
     assert!(
@@ -448,12 +448,12 @@ fn reindex_stress_overlays(
     open(
         db,
         &fixture.paths[STRESS_OVERLAY],
-        "def stress_overlay_old: U32\n  1\n",
+        "def stress_overlay_old() -> U32:\n  1\n",
     );
     let old_overlay = payload_weak(db, &fixture.uris[STRESS_OVERLAY]);
     snapshots.push(old_overlay.clone());
     let overlay = format!(
-        "import ./file_{STRESS_WATCHED}.bend as Watched\ndef stress_overlay_new: U32\n  Watched.stress_watched_{cycle}\n"
+        "import ./file_{STRESS_WATCHED}.bend as Watched\ndef stress_overlay_new() -> U32:\n  Watched.stress_watched_{cycle}\n"
     );
     replace(db, &fixture.paths[STRESS_OVERLAY], &overlay);
     assert!(old_overlay.upgrade().is_none());
@@ -467,7 +467,7 @@ fn reindex_stress_overlays(
     );
 
     let old_watched = payload_weak(db, &fixture.uris[STRESS_WATCHED]);
-    fixture.sources[STRESS_WATCHED] = format!("def stress_watched_{cycle}: U32\n  {cycle}\n");
+    fixture.sources[STRESS_WATCHED] = format!("def stress_watched_{cycle}() -> U32:\n  {cycle}\n");
     fs::write(
         &fixture.paths[STRESS_WATCHED],
         &fixture.sources[STRESS_WATCHED],
@@ -604,7 +604,8 @@ fn repeated_10000_file_import_lifecycle_releases_snapshots_and_preserves_identit
             );
         }
         assert_shared_root_retained(&db, &fixture, &identities);
-        fixture.sources[STRESS_OVERLAY] = format!("def stress_fresh_{cycle}: U32\n  {cycle}\n");
+        fixture.sources[STRESS_OVERLAY] =
+            format!("def stress_fresh_{cycle}() -> U32:\n  {cycle}\n");
         fs::write(
             &fixture.paths[STRESS_OVERLAY],
             &fixture.sources[STRESS_OVERLAY],

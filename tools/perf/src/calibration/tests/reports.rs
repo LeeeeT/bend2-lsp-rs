@@ -14,9 +14,9 @@ use std::{
 
 fn dataset(job_id: &str, role: &str, pairs: u64) -> Value {
     let identities = [
-        ("inlay_hints_warm", Some("small")),
-        ("inlay_hints_warm", Some("medium")),
-        ("inlay_hints_warm", Some("large")),
+        ("document_symbols_warm", Some("small")),
+        ("document_symbols_warm", Some("medium")),
+        ("document_symbols_warm", Some("large")),
         ("cold_snapshot_build_small", None),
     ];
     let variants: Map<_, _> = VARIANTS.iter().enumerate().map(|(index, name)| ((*name).to_owned(), json!({"source_sha256": if matches!(*name, "a" | "b") { "a".repeat(64) } else { format!("{:x}", index + 1).repeat(64) }, "binary_sha256": format!("{:x}", index + 1).repeat(64), "executable": format!("/isolated/{name}/analysis"), "layout_probe": {"symbol": "analysis::calibration_layout_probe", "address": "1000", "size": if *name == "layout" { 1024 } else { 8 }}, "layout_probe_collected": false}))).collect();
@@ -266,7 +266,7 @@ fn positive_controls_must_exceed_two_percent_for_every_validation_signal() -> To
 }
 
 #[test]
-fn discovery_control_failure_and_non_inlay_control_shifts_are_diagnostic() -> ToolResult<()> {
+fn discovery_control_failure_and_non_symbols_control_shifts_are_diagnostic() -> ToolResult<()> {
     let mut fixture = Fixture::new()?;
     counts(&mut fixture.training, "extra_work", "Ir", 100, None)?;
     for sample in fixture.validation["samples"]

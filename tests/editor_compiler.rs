@@ -110,14 +110,15 @@ mod compiler {
 
     #[test]
     fn all_real_blocks_on_both_streams_are_mapped_without_context_errors() {
-        let body = "/bin/cat >&2 <<'ERROR'\nError:\n- message  : root failure\nLocation: main\n2>| def main: U32\n  |     ^^^^\n3 |   0\nERROR\n/bin/cat <<'ERROR'\nError:\n- message  : imported failure\nContext:\n- note : U32\nLocation: Dep.value\n1>| def value: U32\n  |     ^^^^^\n2 |   1\nERROR\nexit 1";
-        let (directory, mut client) = compatible(body, &[("dep.bend", "def value: U32\n  1\n")]);
+        let body = "/bin/cat >&2 <<'ERROR'\nError:\n- message  : root failure\nLocation: main\n2>| def main() -> U32:\n  |     ^^^^\n3 |   0\nERROR\n/bin/cat <<'ERROR'\nError:\n- message  : imported failure\nContext:\n- note : U32\nLocation: Dep.value\n1>| def value() -> U32:\n  |     ^^^^^\n2 |   1\nERROR\nexit 1";
+        let (directory, mut client) =
+            compatible(body, &[("dep.bend", "def value() -> U32:\n  1\n")]);
         let dependency = directory.path().join("dep.bend");
         let root = uri(&directory.path().join("main.bend"));
         open(
             &mut client,
             &root,
-            "import dep.bend as Dep\ndef main: U32\n  0\n",
+            "import dep.bend as Dep\ndef main() -> U32:\n  0\n",
         );
         let root_items = diagnostics(&mut client, &root, Some(1));
         let imported_items = diagnostics(&mut client, &uri(&dependency), None);
@@ -137,21 +138,23 @@ mod compiler {
 
     #[test]
     fn neighboring_lines_disambiguate_identical_marked_import_lines() {
-        let body = "printf 'Error:\nimported error\nLocation: Dep.value\n2>| def value: U32\n3 |   2\n' >&2\nexit 1";
-        let (directory, mut client) =
-            compatible(body, &[("dep.bend", "# dependency\ndef value: U32\n  2\n")]);
+        let body = "printf 'Error:\nimported error\nLocation: Dep.value\n2>| def value() -> U32:\n3 |   2\n' >&2\nexit 1";
+        let (directory, mut client) = compatible(
+            body,
+            &[("dep.bend", "# dependency\ndef value() -> U32:\n  2\n")],
+        );
         let dependency = directory.path().join("dep.bend");
         let root = uri(&directory.path().join("main.bend"));
         open(
             &mut client,
             &root,
-            "import dep.bend as Dep\ndef value: U32\n  1\n",
+            "import dep.bend as Dep\ndef value() -> U32:\n  1\n",
         );
         assert!(diagnostics(&mut client, &root, Some(1)).is_empty());
         let imported = diagnostics(&mut client, &uri(&dependency), None);
         assert_eq!(
             imported[0]["range"],
-            json!({"start":{"line":1,"character":0},"end":{"line":1,"character":14}})
+            json!({"start":{"line":1,"character":0},"end":{"line":1,"character":19}})
         );
         assert_eq!(imported[0]["message"], "imported error");
         client.finish();
@@ -159,14 +162,17 @@ mod compiler {
 
     #[test]
     fn ambiguous_excerpt_is_not_assigned_to_an_imported_file() {
-        let body = "printf 'Error:\nambiguous error\nLocation:\n2>| def value: U32\n' >&2\nexit 1";
-        let (directory, mut client) =
-            compatible(body, &[("dep.bend", "# dependency\ndef value: U32\n  1\n")]);
+        let body =
+            "printf 'Error:\nambiguous error\nLocation:\n2>| def value() -> U32:\n' >&2\nexit 1";
+        let (directory, mut client) = compatible(
+            body,
+            &[("dep.bend", "# dependency\ndef value() -> U32:\n  1\n")],
+        );
         let root = uri(&directory.path().join("main.bend"));
         open(
             &mut client,
             &root,
-            "import dep.bend as Dep\ndef value: U32\n  1\n",
+            "import dep.bend as Dep\ndef value() -> U32:\n  1\n",
         );
         let items = diagnostics(&mut client, &root, Some(1));
         assert_eq!(items.len(), 1);
@@ -182,9 +188,16 @@ mod compiler {
         let body = "printf 'Error:\nundefined name\nLocation:\n2>|   \"😀\" + missing\n |          ^^^^^^^\n' >&2\nexit 1";
         let (directory, mut client) = compatible(body, &[]);
         let root = uri(&directory.path().join("main.bend"));
-        fs::write(directory.path().join("main.bend"), "def main: U32\n  0\n")
-            .must_be("write stale disk source");
-        open(&mut client, &root, "def main: U32\n  \"😀\" + missing\n");
+        fs::write(
+            directory.path().join("main.bend"),
+            "def main() -> U32:\n  0\n",
+        )
+        .must_be("write stale disk source");
+        open(
+            &mut client,
+            &root,
+            "def main() -> U32:\n  \"😀\" + missing\n",
+        );
         let items = diagnostics(&mut client, &root, Some(1));
         assert_eq!(
             items[0]["range"],
@@ -197,9 +210,9 @@ mod compiler {
     fn newer_version_with_real_cli_contract_is_accepted_and_probes_cached() {
         let (directory, mut client) = compatible("exit 0", &[]);
         let root = uri(&directory.path().join("main.bend"));
-        open(&mut client, &root, "def main: U32\n  0\n");
+        open(&mut client, &root, "def main() -> U32:\n  0\n");
         assert!(diagnostics(&mut client, &root, Some(1)).is_empty());
-        client.notify("textDocument/didChange", json!({"textDocument":{"uri":root,"version":2},"contentChanges":[{"text":"def main: U32\n  1\n"}]}));
+        client.notify("textDocument/didChange", json!({"textDocument":{"uri":root,"version":2},"contentChanges":[{"text":"def main() -> U32:\n  1\n"}]}));
         assert!(diagnostics(&mut client, &root, Some(2)).is_empty());
         let probes = fs::read_to_string(directory.path().join("bend.probes"))
             .must_be("read compatibility probes");
@@ -219,7 +232,7 @@ mod compiler {
             &[],
         );
         let root = uri(&directory.path().join("main.bend"));
-        open(&mut client, &root, "def main: U32\n  0\n");
+        open(&mut client, &root, "def main() -> U32:\n  0\n");
         let items = diagnostics(&mut client, &root, Some(1));
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["code"], "compiler-incompatible");
@@ -241,13 +254,13 @@ mod compiler {
     #[test]
     fn unknown_probe_contract_does_not_hide_actual_compiler_errors() {
         let (directory, mut client) = fixture(
-            "printf 'Error:\noriginal textual failure\nLocation:\n1>| def main: U32\n' >&2\nexit 1",
+            "printf 'Error:\noriginal textual failure\nLocation:\n1>| def main() -> U32:\n' >&2\nexit 1",
             "",
             "",
             &[],
         );
         let root = uri(&directory.path().join("main.bend"));
-        open(&mut client, &root, "def main: U32\n  0\n");
+        open(&mut client, &root, "def main() -> U32:\n  0\n");
         let items = diagnostics(&mut client, &root, Some(1));
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["message"], "original textual failure");
@@ -262,7 +275,7 @@ mod compiler {
             &[],
         );
         let root = uri(&directory.path().join("main.bend"));
-        open(&mut client, &root, "def main: U32\n  0\n");
+        open(&mut client, &root, "def main() -> U32:\n  0\n");
         let items = diagnostics(&mut client, &root, Some(1));
         assert_eq!(items.len(), 1);
         assert_eq!(
@@ -281,7 +294,11 @@ mod compiler {
         let body = "printf 'Error:\nundefined name\nLocation:\n2>|   \"😀\" + missing\n |     ^\n' >&2\nexit 1";
         let (directory, mut client) = compatible(body, &[]);
         let root = uri(&directory.path().join("main.bend"));
-        open(&mut client, &root, "def main: U32\n  \"😀\" + missing\n");
+        open(
+            &mut client,
+            &root,
+            "def main() -> U32:\n  \"😀\" + missing\n",
+        );
         let items = diagnostics(&mut client, &root, Some(1));
         // Column four is the middle of the emoji's UTF-16 surrogate pair.
         assert_eq!(
@@ -306,12 +323,12 @@ mod compiler {
         let mut client = LspClient::spawn(command);
         client.initialize(directory.path());
         let root = uri(&directory.path().join("main.bend"));
-        open(&mut client, &root, "def main: U32\n  0\n");
+        open(&mut client, &root, "def main() -> U32:\n  0\n");
         let missing = diagnostics(&mut client, &root, Some(1));
         assert_eq!(missing[0]["code"], "compiler-unavailable");
         install_recovered_compiler(&directory.path().join("bend"));
         client.notify("textDocument/didChange", json!({
-            "textDocument":{"uri":root,"version":2},"contentChanges":[{"text":"def main: U32\n  1\n"}]
+            "textDocument":{"uri":root,"version":2},"contentChanges":[{"text":"def main() -> U32:\n  1\n"}]
         }));
         assert!(
             diagnostics(&mut client, &root, Some(2)).is_empty(),
@@ -329,14 +346,14 @@ mod compiler {
             &[],
         );
         let root = uri(&directory.path().join("main.bend"));
-        open(&mut client, &root, "def main: U32\n  0\n");
+        open(&mut client, &root, "def main() -> U32:\n  0\n");
         assert_eq!(
             diagnostics(&mut client, &root, Some(1))[0]["code"],
             "compiler-incompatible"
         );
         install_recovered_compiler(&directory.path().join("bend"));
         client.notify("textDocument/didChange", json!({
-            "textDocument":{"uri":root,"version":2},"contentChanges":[{"text":"def main: U32\n  1\n"}]
+            "textDocument":{"uri":root,"version":2},"contentChanges":[{"text":"def main() -> U32:\n  1\n"}]
         }));
         assert!(
             diagnostics(&mut client, &root, Some(2)).is_empty(),

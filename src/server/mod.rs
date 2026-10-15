@@ -14,6 +14,7 @@ mod orchestration;
 mod reference_locations;
 mod requests;
 mod revision;
+mod semantics;
 mod state;
 mod telemetry;
 mod transport;

@@ -22,13 +22,13 @@ use std::{
     process::{Command, Stdio},
 };
 
-const INLAY_ANCHOR: &str = "fn inlay_hints_warm(fixture: WarmSnapshot) -> Vec<analysis::InlayHint> {\n    std::hint::black_box(analysis::inlay_hints(\n        std::hint::black_box(fixture.snapshot),\n        analysis::TextRange::new(0, fixture.source.len()),\n    ))\n}";
+const CONTROL_ANCHOR: &str = "fn document_symbols_warm(fixture: WarmSnapshot) -> Vec<analysis::Symbol> {\n    std::hint::black_box(analysis::document_symbols(std::hint::black_box(\n        fixture.snapshot,\n    )))\n}";
 const SETUP_ANCHORS: [&str; 3] = [
-    "    fn small() -> Self {\n        Self {\n            source: SOURCE,\n            snapshot: &SMALL_SNAPSHOT,\n            completion_prefix: \"transform_\",\n            identifier_name: \"transform_31\",\n        }\n    }",
-    "    fn medium() -> Self {\n        Self {\n            source: MEDIUM_SOURCE,\n            snapshot: &MEDIUM_SNAPSHOT,\n            completion_prefix: \"worker_\",\n            identifier_name: \"worker_0199\",\n        }\n    }",
-    "    fn large() -> Self {\n        Self {\n            source: LARGE_SOURCE,\n            snapshot: &LARGE_SNAPSHOT,\n            completion_prefix: \"worker_\",\n            identifier_name: \"worker_0599\",\n        }\n    }",
+    "    fn small() -> Self {\n        Self {\n            snapshot: &SMALL_SNAPSHOT,\n        }\n    }",
+    "    fn medium() -> Self {\n        Self {\n            snapshot: &MEDIUM_SNAPSHOT,\n        }\n    }",
+    "    fn large() -> Self {\n        Self {\n            snapshot: &LARGE_SNAPSHOT,\n        }\n    }",
 ];
-const HELPERS: &str = "#[inline(never)]\nfn calibration_inlay_query(\n    snapshot: &analysis::DocumentSnapshot,\n    source_len: usize,\n) -> Vec<analysis::InlayHint> {\n    std::hint::black_box(analysis::inlay_hints(\n        std::hint::black_box(snapshot),\n        analysis::TextRange::new(0, source_len),\n    ))\n}\n\n#[inline(never)]\nfn calibration_allocation_control() {\n    std::hint::black_box(vec![1_u64; 65_536]);\n}\n\n";
+const HELPERS: &str = "#[inline(never)]\nfn calibration_symbols_query(snapshot: &analysis::DocumentSnapshot) -> Vec<analysis::Symbol> {\n    std::hint::black_box(analysis::document_symbols(std::hint::black_box(snapshot)))\n}\n\n#[inline(never)]\nfn calibration_allocation_control() {\n    std::hint::black_box(vec![1_u64; 65_536]);\n}\n\n";
 
 type Environment = BTreeMap<OsString, OsString>;
 
@@ -50,7 +50,7 @@ pub(super) fn variant_harness(text: &str, variant: &str) -> ToolResult<String> {
         "source harness already contains a calibration layout probe",
     )?;
     require(
-        text.matches(INLAY_ANCHOR).count() == 1,
+        text.matches(CONTROL_ANCHOR).count() == 1,
         "calibration anchor must occur exactly once",
     )?;
     for anchor in SETUP_ANCHORS {
@@ -77,7 +77,7 @@ pub(super) fn variant_harness(text: &str, variant: &str) -> ToolResult<String> {
         "#[inline(never)]\nfn {PROBE}({argument}: u64) -> u64 {{\n{body}\n}}\n\n{HELPERS}struct WarmSnapshot {{"
     );
     text = exact_replace(&text, "struct WarmSnapshot {", &helpers)?;
-    let query = "calibration_inlay_query(\n        std::hint::black_box(fixture.snapshot),\n        std::hint::black_box(fixture.source.len()),\n    )";
+    let query = "calibration_symbols_query(std::hint::black_box(fixture.snapshot))";
     let measured = match variant {
         "extra_work" => {
             format!("    std::hint::black_box({query});\n    std::hint::black_box({query})")
@@ -89,9 +89,9 @@ pub(super) fn variant_harness(text: &str, variant: &str) -> ToolResult<String> {
     };
     exact_replace(
         &text,
-        INLAY_ANCHOR,
+        CONTROL_ANCHOR,
         &format!(
-            "fn inlay_hints_warm(fixture: WarmSnapshot) -> Vec<analysis::InlayHint> {{\n{measured}\n}}"
+            "fn document_symbols_warm(fixture: WarmSnapshot) -> Vec<analysis::Symbol> {{\n{measured}\n}}"
         ),
     )
 }

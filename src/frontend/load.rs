@@ -3,13 +3,14 @@
 
 use std::{
     collections::HashMap,
+    ops::Range,
     path::{Path, PathBuf},
 };
 
 use super::{
     Error,
     book::Book,
-    occurrence::{Occurrence, settle},
+    occurrence::{Binder, Occurrence, settle},
     parse::{Parse, is_js_space, is_word_unit, text},
     trace::TldTrace,
 };
@@ -59,20 +60,77 @@ pub struct LoadedFile {
     pub parsed: Vec<u16>,
     /// What each name means, in the declarations that parsed completely.
     pub occurrences: Vec<Occurrence>,
+    /// The text of the file.
+    pub source: String,
+    /// For each line, where it starts in the parsed text and in the source,
+    /// in UTF-16 code units.
+    pub lines: Vec<(usize, usize)>,
+    /// The file's declarations, as indexes in the load's declarations.
+    pub tlds: Range<usize>,
+}
+
+impl LoadedFile {
+    /// The source offset of a parsed offset, in UTF-16 code units.
+    #[must_use]
+    pub fn source_offset(&self, parsed: usize) -> usize {
+        let line = self
+            .lines
+            .partition_point(|(start, _)| *start <= parsed)
+            .saturating_sub(1);
+        self.lines
+            .get(line)
+            .map_or(parsed, |(start, source)| source + (parsed - start))
+    }
+}
+
+/// A file whose import lines the loader was reading when the load stopped.
+#[derive(Clone, Debug, Default)]
+pub struct ReadingFile {
+    pub real: String,
+    pub ns: String,
+    /// The aliases of the imports that the loader read before it stopped.
+    pub al: Vec<(String, String)>,
+    pub source: String,
+}
+
+/// The text that the offsets of a load error refer to.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ErrorText {
+    /// The parsed text of `files[index]`.
+    Parsed(usize),
+    /// The source of `reading[index]`.
+    Source(usize),
+}
+
+/// The local binders in scope where a load stopped: from the outermost to the
+/// innermost, each with its name.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Scope {
+    pub file: usize,
+    pub binders: Vec<(String, Binder)>,
 }
 
 /// Everything that one load produced, up to its first error.
 #[derive(Debug, Default)]
 pub struct Load {
     pub book: Book,
+    /// The canonical path of the entry.
+    pub entry: Option<String>,
     pub files: Vec<LoadedFile>,
+    /// The files whose import lines the loader was reading when it stopped,
+    /// from the entry inward.
+    pub reading: Vec<ReadingFile>,
     pub tlds: Vec<TldTrace>,
     pub error: Option<Error>,
+    pub error_text: Option<ErrorText>,
+    /// With a partial load, the binders in scope where its entry stopped.
+    pub scope: Option<Scope>,
 }
 
 struct Loader<'a> {
     files: &'a dyn Files,
     env: &'a Env,
+    partial: bool,
     load: Load,
     seen: HashMap<String, Option<String>>,
 }
@@ -80,9 +138,23 @@ struct Loader<'a> {
 /// Load `entry` as the compiler loads the file it checks.
 #[must_use]
 pub fn load(files: &dyn Files, env: &Env, entry: &str) -> Load {
+    load_with(files, env, entry, false)
+}
+
+/// Load `entry` as `load` does, but keep what the parser decided in a
+/// declaration that fails, and the binders in scope where the entry stops.
+/// The text of a file up to a position, loaded this way, tells what each
+/// name means and which binders are visible at that position.
+#[must_use]
+pub fn load_partial(files: &dyn Files, env: &Env, entry: &str) -> Load {
+    load_with(files, env, entry, true)
+}
+
+fn load_with(files: &dyn Files, env: &Env, entry: &str, partial: bool) -> Load {
     let mut loader = Loader {
         files,
         env,
+        partial,
         load: Load::default(),
         seen: HashMap::new(),
     };
@@ -355,6 +427,7 @@ impl Loader<'_> {
     ) -> Result<(), Error> {
         let at = at.unwrap_or(None);
         let real = self.book_file(file, &at)?;
+        self.load.entry.get_or_insert_with(|| real.clone());
         if let Some(state) = self.seen.get(&real) {
             if state.is_none() {
                 return Err(error(format!("an import cycle through {file}"), None, &at));
@@ -367,8 +440,22 @@ impl Loader<'_> {
         let source = self.files.read(Path::new(&real)).unwrap_or_default();
         let units: Vec<u16> = source.encode_utf16().collect();
         let lines: Vec<&[u16]> = units.split(|unit| *unit == 10).collect();
+        let source_starts: Vec<usize> = lines
+            .iter()
+            .scan(0, |start, line| {
+                let here = *start;
+                *start += line.len() + 1;
+                Some(here)
+            })
+            .collect();
         let mut body: Vec<&[u16]> = lines.clone();
         let mut aliases: Vec<(String, String)> = Vec::new();
+        let reading = self.load.reading.len();
+        self.load.reading.push(ReadingFile {
+            real: real.clone(),
+            ns: ns.to_owned(),
+            ..ReadingFile::default()
+        });
         let mut offset = 0;
         for (index, raw) in lines.iter().enumerate() {
             let line_at = offset;
@@ -392,9 +479,32 @@ impl Loader<'_> {
                 dir: &dir,
                 top: &top,
             };
-            self.import(&import, &mut aliases)?;
+            if let Err(error) = self.import(&import, &mut aliases) {
+                let stopped = &mut self.load.reading[reading];
+                stopped.al = aliases;
+                stopped.source = source;
+                self.load
+                    .error_text
+                    .get_or_insert(ErrorText::Source(reading));
+                return Err(error);
+            }
         }
-        self.parse_file(real, ns, aliases, body.join(&10))
+        self.load.reading.truncate(reading);
+        let mut line_map = Vec::with_capacity(body.len());
+        let mut parsed_start = 0;
+        for (line, source_start) in body.iter().zip(&source_starts) {
+            line_map.push((parsed_start, *source_start));
+            parsed_start += line.len() + 1;
+        }
+        let file = ReadyFile {
+            real,
+            ns,
+            aliases,
+            parsed: body.join(&10),
+            source,
+            lines: line_map,
+        };
+        self.parse_file(file)
     }
 
     fn import(
@@ -486,14 +596,17 @@ impl Loader<'_> {
         self.book_load(&got, &sub, Some(sp), Some(import.top))
     }
 
-    fn parse_file(
-        &mut self,
-        real: String,
-        ns: &str,
-        aliases: Vec<(String, String)>,
-        parsed: Vec<u16>,
-    ) -> Result<(), Error> {
+    fn parse_file(&mut self, file: ReadyFile) -> Result<(), Error> {
+        let ReadyFile {
+            real,
+            ns,
+            aliases,
+            parsed,
+            source,
+            lines,
+        } = file;
         let first = self.load.book.order.len();
+        let first_tld = self.load.tlds.len();
         let mut events = Vec::new();
         let mut p = Parse {
             book: &mut self.load.book,
@@ -505,15 +618,38 @@ impl Loader<'_> {
             frs: 0,
             tlds: &mut self.load.tlds,
             events: &mut events,
+            partial: self.partial,
         };
         let result = p.book();
+        if result.is_err() && self.partial && ns.is_empty() {
+            let tld = p.tlds.len().saturating_sub(1);
+            let binders = p
+                .stk
+                .iter()
+                .map(|(name, index)| {
+                    let binder = Binder { tld, index: *index };
+                    (name.clone(), binder)
+                })
+                .collect();
+            self.load.scope = Some(Scope {
+                file: self.load.files.len(),
+                binders,
+            });
+        }
         self.load.files.push(LoadedFile {
             real: real.clone(),
             ns: ns.to_owned(),
             al: aliases,
             parsed,
             occurrences: settle(events),
+            source,
+            lines,
+            tlds: first_tld..self.load.tlds.len(),
         });
+        if result.is_err() {
+            let parsed = ErrorText::Parsed(self.load.files.len() - 1);
+            self.load.error_text.get_or_insert(parsed);
+        }
         result?;
         if real == self.env.base {
             self.load.book.mark_base(first);
@@ -521,6 +657,16 @@ impl Loader<'_> {
         self.seen.insert(real, Some(ns.to_owned()));
         Ok(())
     }
+}
+
+/// A file ready to parse.
+struct ReadyFile<'a> {
+    real: String,
+    ns: &'a str,
+    aliases: Vec<(String, String)>,
+    parsed: Vec<u16>,
+    source: String,
+    lines: Vec<(usize, usize)>,
 }
 
 /// One import line of a file.

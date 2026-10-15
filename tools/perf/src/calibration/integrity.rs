@@ -338,7 +338,7 @@ pub(super) fn parse_workload_list(text: &str) -> ToolResult<BTreeSet<Identity>> 
     )?;
     require(
         signals().is_subset(&identities),
-        "executed harness is missing the three inlay_hints_warm positive-control workloads",
+        "executed harness is missing the three document_symbols_warm positive-control workloads",
     )?;
     Ok(identities)
 }
@@ -346,7 +346,7 @@ pub(super) fn parse_workload_list(text: &str) -> ToolResult<BTreeSet<Identity>> 
 pub(super) fn signals() -> BTreeSet<Identity> {
     ["small", "medium", "large"]
         .into_iter()
-        .map(|size| ("inlay_hints_warm".to_owned(), Some(size.to_owned())))
+        .map(|size| ("document_symbols_warm".to_owned(), Some(size.to_owned())))
         .collect()
 }
 

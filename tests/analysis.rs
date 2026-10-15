@@ -200,10 +200,10 @@ fn folding_handles_empty_documents_and_unclosed_syntax_at_eof() {
 }
 #[test]
 fn syntax_index_lexes_once_and_reuses_names_imports_calls_and_context() {
-    use bend2_lsp::analysis::{TokenKind, completion_items, identifier_ranges, signature_help};
+    use bend2_lsp::analysis::TokenKind;
 
     let source = r#"import lib.bend as Lib
-def target(a: Type, b: Type):
+def target(a: Type, b: Type) -> U32:
   "target(y) \" ( [ #"
   # target(x, [)
   target(1, nested(2, 3),
@@ -214,27 +214,22 @@ def target(a: Type, b: Type):
     assert_eq!(imports[0].path_text(source), "lib.bend");
     assert_eq!(imports[0].alias_text(source), Some("Lib"));
 
-    let targets = identifier_ranges(&snapshot, "target");
-    assert_eq!(targets.len(), 2, "comments and strings are not identifiers");
-    let target_id = snapshot
+    let identifiers = snapshot
         .syntax
-        .name_id(source, "target")
-        .and_then(|name| snapshot.syntax.symbol_by_name(name))
-        .must_be("indexed target declaration")
-        .id;
-    let target_references: Vec<_> = snapshot.syntax.references(target_id).collect();
-    assert_eq!(target_references.len(), 2);
-    assert!(
-        target_references
-            .iter()
-            .any(|reference| reference.kind == bend2_lsp::analysis::ReferenceKind::Declaration)
-    );
+        .tokens()
+        .iter()
+        .filter(|token| {
+            token.kind == TokenKind::Identifier
+                && &source[token.range.start..token.range.end] == "target"
+        })
+        .count();
+    assert_eq!(identifiers, 2, "comments and strings are not identifiers");
     let recursive_call = snapshot
         .syntax
-        .calls_to(target_id)
-        .next()
+        .calls()
+        .iter()
+        .find(|call| snapshot.syntax.name_text(source, call.name) == "target")
         .must_be("indexed recursive call");
-    assert_eq!(recursive_call.caller, Some(target_id));
     assert_eq!(
         snapshot
             .syntax
@@ -248,7 +243,6 @@ def target(a: Type, b: Type):
         snapshot.syntax.call_at(source.len()).map(|(_, n)| n),
         Some(2)
     );
-    assert_eq!(completion_items(&snapshot, "tar")[0].label, "target");
     let string = snapshot
         .syntax
         .tokens()
@@ -266,10 +260,6 @@ def target(a: Type, b: Type):
             .syntax
             .is_in_comment_or_string(source.find("# target").must_be("comment text") + 3)
     );
-
-    let help = signature_help(&snapshot, source.len()).must_be("incomplete call remains indexed");
-    assert_eq!(help.parameters, ["a: Type", "b: Type"]);
-    assert_eq!(help.active_parameter, 1);
 }
 
 #[test]
@@ -278,7 +268,7 @@ fn syntax_index_keeps_malformed_literal_hole_and_delimiter_diagnostics() {
 
     let snapshot = DocumentSnapshot::new(
         Revision(1),
-        "def main: Type\n  ?TODO\n  value[)\n  \"unfinished\n".to_owned(),
+        "def main() -> Type:\n  ?TODO\n  value[)\n  \"unfinished\n".to_owned(),
     );
     let diagnostics = snapshot.syntax.diagnostics();
     assert!(
@@ -300,181 +290,6 @@ fn syntax_index_keeps_malformed_literal_hole_and_delimiter_diagnostics() {
         diagnostics
             .iter()
             .any(|diagnostic| diagnostic.kind == DiagnosticKind::UnclosedDelimiter('['))
-    );
-}
-#[test]
-fn resolved_names_keep_parameter_and_pattern_shadowing_local() {
-    use bend2_lsp::analysis::identifier_ranges;
-
-    let source = "def target(value):\n  value\ndef shadow(target):\n  target(1)\ndef main:\n  target(2)\ndef choose(value):\n  match value:\n    case Some(item):\n      item\n    case None:\n      0\n  item\n";
-    let snapshot = DocumentSnapshot::new(Revision(1), source.to_owned());
-    let target_name = snapshot
-        .syntax
-        .name_id(source, "target")
-        .must_be("target name");
-    let target = snapshot
-        .syntax
-        .symbol_by_name(target_name)
-        .must_be("top-level target");
-    assert_eq!(identifier_ranges(&snapshot, "target").len(), 2);
-
-    let shadow_call = source.find("target(1)").must_be("shadowed call");
-    let local_token = snapshot
-        .syntax
-        .token_at_or_before(shadow_call)
-        .must_be("local target token");
-    let local = snapshot
-        .syntax
-        .symbol_for_token(local_token)
-        .must_be("resolved local binding");
-    assert_ne!(local, target.id);
-    let binding = snapshot
-        .syntax
-        .binding_by_id(local)
-        .must_be("parameter binding");
-    assert_eq!(snapshot.syntax.name_text(source, binding.name), "target");
-    assert_eq!(snapshot.syntax.references(local).count(), 2);
-
-    let branch_use = source.find("      item").must_be("pattern branch binding") + 6;
-    let branch_token = snapshot
-        .syntax
-        .token_at_or_before(branch_use)
-        .must_be("pattern variable token");
-    let branch_id = snapshot
-        .syntax
-        .symbol_for_token(branch_token)
-        .must_be("resolved pattern variable");
-    let branch = snapshot
-        .syntax
-        .binding_by_id(branch_id)
-        .must_be("pattern binding");
-    assert!(branch.scope.contains(branch_use));
-
-    let outside_use = source.rfind("  item").must_be("out-of-scope variable") + 2;
-    let outside_token = snapshot
-        .syntax
-        .token_at_or_before(outside_use)
-        .must_be("out-of-scope token");
-    assert_eq!(snapshot.syntax.symbol_for_token(outside_token), None);
-}
-
-fn assert_exact_output<T: std::fmt::Debug + PartialEq>(name: &str, candidate: &[T], legacy: &[T]) {
-    assert_eq!(candidate.len(), legacy.len(), "{name} count");
-    for (index, (actual, expected)) in candidate.iter().zip(legacy).enumerate() {
-        assert_eq!(actual, expected, "{name}[{index}] differs");
-    }
-}
-
-fn assert_legacy_fixture_outputs_match_indexed_queries_exactly(
-    source: &str,
-    golden_json: &str,
-    identifier_name: &str,
-) {
-    use bend2_lsp::analysis;
-    use serde_json::Value;
-
-    let golden: Value =
-        serde_json::from_str(golden_json).must_be("legacy output fixture must parse");
-    assert_eq!(
-        golden["source_bytes"]
-            .as_u64()
-            .must_be("legacy fixture size must be an integer"),
-        u64::try_from(source.len()).must_be("fixture size fits u64")
-    );
-
-    let snapshot = DocumentSnapshot::new(Revision(1), source.to_owned());
-    let semantic_tokens: Vec<[u32; 5]> = analysis::semantic_tokens(&snapshot)
-        .into_iter()
-        .map(|token| {
-            let start = snapshot
-                .line_index
-                .position(&snapshot.text, token.range.start);
-            let end = snapshot
-                .line_index
-                .position(&snapshot.text, token.range.end);
-            [start.0, start.1, end.0, end.1, token.token_type]
-        })
-        .collect();
-    let legacy_tokens: Vec<[u32; 5]> = serde_json::from_value(golden["semantic_tokens"].clone())
-        .must_be("legacy semantic tokens must match the canonical shape");
-    assert_exact_output(
-        "semantic token (line, range, kind)",
-        &semantic_tokens,
-        &legacy_tokens,
-    );
-
-    let identifier_ranges: Vec<[u32; 4]> = analysis::identifier_ranges(&snapshot, identifier_name)
-        .into_iter()
-        .map(|range| {
-            let start = snapshot.line_index.position(&snapshot.text, range.start);
-            let end = snapshot.line_index.position(&snapshot.text, range.end);
-            [start.0, start.1, end.0, end.1]
-        })
-        .collect();
-    let legacy_ranges: Vec<[u32; 4]> = serde_json::from_value(golden["identifier_ranges"].clone())
-        .must_be("legacy identifier ranges must match the canonical shape");
-    assert_exact_output(
-        "identifier range (line and range)",
-        &identifier_ranges,
-        &legacy_ranges,
-    );
-}
-
-fn assert_legacy_inlay_hints_match_exactly(source: &str, golden_json: &str, size: &str) {
-    use bend2_lsp::analysis;
-
-    let snapshot = DocumentSnapshot::new(Revision(1), source.to_owned());
-    let actual: Vec<(u32, u32, String)> =
-        analysis::inlay_hints(&snapshot, TextRange::new(0, snapshot.text.len()))
-            .into_iter()
-            .map(|hint| {
-                let position = snapshot.line_index.position(&snapshot.text, hint.position);
-                (position.0, position.1, hint.label(&snapshot.text))
-            })
-            .collect();
-    let expected: Vec<(u32, u32, String)> =
-        serde_json::from_str(golden_json).must_be("legacy inlay hints must parse");
-    assert_exact_output(
-        &format!("{size} inlay hint (position, parameter label)"),
-        &actual,
-        &expected,
-    );
-}
-
-#[test]
-fn medium_and_large_inlay_hints_match_legacy_exactly() {
-    assert_legacy_inlay_hints_match_exactly(
-        include_str!("../benches/fixtures/analyzer_medium.bend"),
-        include_str!("fixtures/analysis_legacy_inlay_medium.json"),
-        "medium",
-    );
-    assert_legacy_inlay_hints_match_exactly(
-        include_str!("../benches/fixtures/analyzer_large.bend"),
-        include_str!("fixtures/analysis_legacy_inlay_large.json"),
-        "large",
-    );
-}
-
-#[test]
-fn small_legacy_fixture_outputs_match_indexed_queries_exactly() {
-    assert_legacy_fixture_outputs_match_indexed_queries_exactly(
-        include_str!("../benches/fixtures/analyzer_input.bend"),
-        include_str!("fixtures/analysis_legacy_outputs.json"),
-        "transform_31",
-    );
-}
-
-#[test]
-fn medium_and_large_legacy_fixture_outputs_match_indexed_queries_exactly() {
-    assert_legacy_fixture_outputs_match_indexed_queries_exactly(
-        include_str!("../benches/fixtures/analyzer_medium.bend"),
-        include_str!("fixtures/analysis_legacy_medium_outputs.json"),
-        "worker_0199",
-    );
-    assert_legacy_fixture_outputs_match_indexed_queries_exactly(
-        include_str!("../benches/fixtures/analyzer_large.bend"),
-        include_str!("fixtures/analysis_legacy_large_outputs.json"),
-        "worker_0599",
     );
 }
 
@@ -500,46 +315,8 @@ fn constructor_definitions_preserve_source_order_when_names_were_seen_earlier() 
 }
 
 #[test]
-fn inlay_hints_order_nested_calls_and_limit_labels_to_declared_parameters() {
-    let source = "def pair(first: U32, second: U32) -> U32:\n  first\n\
-                  def unary(only: U32) -> U32:\n  only\n\
-                  def main() -> U32:\n  unary(pair(5, 6))\n  pair(1)\n  pair(2, 3, 4)\n  0\n";
-    let snapshot = DocumentSnapshot::new(Revision(1), source.to_owned());
-    let labels = |range| {
-        bend2_lsp::analysis::inlay_hints(&snapshot, range)
-            .into_iter()
-            .map(|hint| {
-                let (line, column) = snapshot.line_index.position(source, hint.position);
-                (line, column, hint.label(source))
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(
-        labels(TextRange::new(0, source.len())),
-        vec![
-            (5, 8, "only: ".to_owned()),
-            (5, 13, "first: ".to_owned()),
-            (5, 16, "second: ".to_owned()),
-            (6, 7, "first: ".to_owned()),
-            (7, 7, "first: ".to_owned()),
-            (7, 10, "second: ".to_owned()),
-        ]
-    );
-    assert_eq!(
-        labels(TextRange::new(
-            snapshot.line_index.offset(source, 5, 13),
-            snapshot.line_index.offset(source, 5, 16),
-        )),
-        vec![
-            (5, 13, "first: ".to_owned()),
-            (5, 16, "second: ".to_owned())
-        ]
-    );
-}
-
-#[test]
 fn dense_index_lookups_distinguish_zero_ids_missing_entries_and_nested_calls() {
-    use bend2_lsp::analysis::{SymbolId, TokenId};
+    use bend2_lsp::analysis::TokenId;
 
     let snapshot = DocumentSnapshot::new(
         Revision(1),
@@ -552,13 +329,12 @@ fn dense_index_lookups_distinguish_zero_ids_missing_entries_and_nested_calls() {
     let declaration = syntax
         .token_at_or_before(first)
         .must_be("declaration token");
-    assert_eq!(syntax.symbol_for_token(declaration), Some(SymbolId(0)));
     assert_eq!(
         syntax
             .reference_for_token(declaration)
             .must_be("declaration reference")
-            .resolved,
-        Some(SymbolId(0))
+            .kind,
+        bend2_lsp::analysis::ReferenceKind::Declaration
     );
     assert_eq!(
         syntax.name_text(
@@ -567,14 +343,7 @@ fn dense_index_lookups_distinguish_zero_ids_missing_entries_and_nested_calls() {
         ),
         "def"
     );
-    assert_eq!(syntax.symbol_for_token(TokenId(0)), None);
-    assert_eq!(
-        syntax
-            .reference_for_token(TokenId(0))
-            .must_be("keyword reference")
-            .resolved,
-        None
-    );
+    assert!(syntax.reference_for_token(TokenId(0)).is_some());
     let punctuation = syntax
         .token_at_or_before(first + "first".len())
         .must_be("opening delimiter");
@@ -584,7 +353,6 @@ fn dense_index_lookups_distinguish_zero_ids_missing_entries_and_nested_calls() {
     assert_eq!(syntax.call_by_open(TokenId(0)), None);
     for token in [TokenId(syntax.tokens().len()), TokenId(usize::MAX)] {
         assert_eq!(syntax.name_for_token(token), None);
-        assert_eq!(syntax.symbol_for_token(token), None);
         assert!(syntax.reference_for_token(token).is_none());
         assert!(syntax.call_for_token(token).is_none());
         assert!(syntax.call_by_open(token).is_none());
@@ -598,8 +366,8 @@ fn dense_index_lookups_distinguish_zero_ids_missing_entries_and_nested_calls() {
         .call_for_token(outer_token)
         .must_be("first call index");
     let inner_call = syntax.call_for_token(inner_token).must_be("nested call");
-    assert_eq!(outer_call.callee, Some(SymbolId(0)));
-    assert_eq!(inner_call.callee, Some(SymbolId(0)));
+    assert_eq!(outer_call.callee_token, outer_token);
+    assert_eq!(inner_call.callee_token, inner_token);
     assert_eq!(syntax.call_by_open(outer_call.open), Some(outer_call));
     assert_eq!(syntax.call_by_open(inner_call.open), Some(inner_call));
     assert_eq!(
@@ -613,13 +381,12 @@ fn dense_index_lookups_distinguish_zero_ids_missing_entries_and_nested_calls() {
     let unknown_token = syntax
         .token_at_or_before(unknown)
         .must_be("unresolved token");
-    assert_eq!(syntax.symbol_for_token(unknown_token), None);
     assert_eq!(
         syntax
             .reference_for_token(unknown_token)
-            .must_be("unresolved reference")
-            .resolved,
-        None
+            .must_be("unknown reference")
+            .kind,
+        bend2_lsp::analysis::ReferenceKind::Read
     );
     assert_eq!(syntax.call_for_token(unknown_token), None);
 }
@@ -653,149 +420,6 @@ fn module_completion_preserves_subsequence_order_case_and_repeated_characters() 
             "query {query}: {items:?}"
         );
     }
-}
-
-#[test]
-fn reference_lookup_preserves_first_declaration_shadowing_and_unresolved_names() {
-    let source = concat!(
-        "def target() -> U32:\n  missing(missing)\n",
-        "def target() -> U32:\n  2\n",
-        "def local(target: U32) -> U32:\n  target\n",
-        "def caller() -> U32:\n  target()\n",
-        "def late() -> U32:\n  unresolved(unresolved)\n",
-    );
-    let snapshot = DocumentSnapshot::new(Revision(1), source.to_owned());
-    let declaration = source.find("target").must_be("first declaration");
-    let call = source.find("  target()").must_be("global call") + 2;
-    assert_eq!(
-        bend2_lsp::analysis::identifier_ranges(&snapshot, "target"),
-        [
-            TextRange::new(declaration, declaration + 6),
-            TextRange::new(call, call + 6),
-        ]
-    );
-    for name in ["missing", "unresolved"] {
-        let expected = source
-            .match_indices(name)
-            .map(|(start, text)| TextRange::new(start, start + text.len()));
-        assert!(
-            bend2_lsp::analysis::identifier_ranges(&snapshot, name)
-                .into_iter()
-                .eq(expected)
-        );
-    }
-    assert!(bend2_lsp::analysis::identifier_ranges(&snapshot, "absent").is_empty());
-}
-
-#[test]
-fn parameter_hints_preserve_nested_order_range_boundaries_and_argument_arity() {
-    let source = concat!(
-        "def add(left: U32, right: U32) -> U32:\n  left\n",
-        "def ident(value: U32) -> U32:\n  value\n",
-        "def zero() -> U32:\n  0\n",
-        "def main() -> U32:\n  add(ident(1), 2)\n  ident(3, 4)\n  unknown(5)\n  zero()\n",
-    );
-    let snapshot = DocumentSnapshot::new(Revision(1), source.to_owned());
-    let nested = source.find("add(ident(1), 2)").must_be("nested call");
-    let extra = source.find("ident(3, 4)").must_be("extra argument call");
-    let expected = [
-        (nested + 4, "left: "),
-        (nested + 10, "value: "),
-        (nested + 14, "right: "),
-        (extra + 6, "value: "),
-    ];
-    let hints = bend2_lsp::analysis::inlay_hints(&snapshot, TextRange::new(0, source.len()));
-    assert!(
-        hints
-            .iter()
-            .map(|hint| (hint.position, hint.label(source)))
-            .eq(expected.map(|(position, label)| (position, label.to_owned())))
-    );
-    let boundary =
-        bend2_lsp::analysis::inlay_hints(&snapshot, TextRange::new(nested + 10, nested + 10));
-    assert!(
-        boundary
-            .iter()
-            .map(|hint| (hint.position, hint.label(source)))
-            .eq([(nested + 10, "value: ".to_owned())])
-    );
-    for range in [
-        TextRange::new(nested + 11, nested + 13),
-        TextRange::new(nested + 14, nested + 4),
-    ] {
-        assert!(bend2_lsp::analysis::inlay_hints(&snapshot, range).is_empty());
-    }
-}
-
-#[test]
-fn parameter_hints_preserve_labels_across_nested_multi_argument_interleavings() {
-    let source = concat!(
-        "def fan(first: U32, second: U32, third: U32) -> U32:\n  first\n",
-        "def ident(value: U32) -> U32:\n  value\n",
-        "def main() -> U32:\n  fan(ident(1), fan(ident(2), ident(3), ident(4)), ident(5))\n",
-    );
-    let calls = [1, 2, 3, 4, 5].map(|value| {
-        source
-            .find(&format!("ident({value})"))
-            .must_be("nested identity call")
-    });
-    let inner = source.find("fan(ident(2)").must_be("nested fan call");
-    let expected = [
-        (calls[0], "first: "),
-        (calls[0] + 6, "value: "),
-        (inner, "second: "),
-        (calls[1], "first: "),
-        (calls[1] + 6, "value: "),
-        (calls[2], "second: "),
-        (calls[2] + 6, "value: "),
-        (calls[3], "third: "),
-        (calls[3] + 6, "value: "),
-        (calls[4], "third: "),
-        (calls[4] + 6, "value: "),
-    ];
-    let snapshot = DocumentSnapshot::new(Revision(1), source.to_owned());
-    let hints = bend2_lsp::analysis::inlay_hints(&snapshot, TextRange::new(0, source.len()));
-    assert!(
-        hints
-            .iter()
-            .map(|hint| (hint.position, hint.label(source)))
-            .eq(expected.map(|(position, label)| (position, label.to_owned())))
-    );
-    let nested = bend2_lsp::analysis::inlay_hints(&snapshot, TextRange::new(inner, calls[3] + 6));
-    assert!(
-        nested
-            .iter()
-            .map(|hint| (hint.position, hint.label(source)))
-            .eq(expected[2..9]
-                .iter()
-                .map(|(position, label)| (*position, (*label).to_owned())))
-    );
-}
-
-#[test]
-fn parameter_hints_distinguish_unresolved_and_zero_arity_calls_from_newly_resolved_calls() {
-    let source = concat!(
-        "import ./other.bend as library\n",
-        "def nop() -> U32:\n  0\n",
-        "def main() -> U32:\n  nop()\n  absent(1)\n  library.echo(2)\n",
-    );
-    let snapshot = DocumentSnapshot::new(Revision(1), source.to_owned());
-    assert!(
-        bend2_lsp::analysis::inlay_hints(&snapshot, TextRange::new(0, source.len())).is_empty()
-    );
-    let revised = format!(
-        "{}\ndef resolved(argument: U32) -> U32:\n  argument\n",
-        source.replace("absent(1)", "resolved(1)")
-    );
-    let argument = revised.find("resolved(1)").must_be("newly resolved call") + 9;
-    let snapshot = DocumentSnapshot::new(Revision(2), revised);
-    let hints = bend2_lsp::analysis::inlay_hints(&snapshot, TextRange::new(0, snapshot.text.len()));
-    assert!(
-        hints
-            .iter()
-            .map(|hint| (hint.position, hint.label(&snapshot.text)))
-            .eq([(argument, "argument: ".to_owned())])
-    );
 }
 
 #[test]

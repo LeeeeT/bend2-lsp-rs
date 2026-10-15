@@ -1,9 +1,9 @@
 use crate::analysis::{self, CompletionKind, DocumentSnapshot, SymbolKind, TextRange};
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionTextEdit, DocumentSymbol, FoldingRange,
-    FoldingRangeKind, InlayHint, InlayHintKind, InlayHintLabel, Location, ParameterInformation,
-    ParameterLabel, Position, Range, SelectionRange, SemanticToken, SignatureHelp,
-    SignatureInformation, SymbolInformation, TextEdit,
+    FoldingRangeKind, Location, ParameterInformation, ParameterLabel, Position, Range,
+    SelectionRange, SemanticToken, SignatureHelp, SignatureInformation, SymbolInformation,
+    TextEdit,
 };
 use url::Url;
 
@@ -40,13 +40,6 @@ pub(super) fn document_symbols(snapshot: &DocumentSnapshot) -> Vec<DocumentSymbo
         .collect::<Vec<_>>();
     tracing::Span::current().record("result_count", symbols.len());
     symbols
-}
-
-pub(super) fn document_symbol_by_id(
-    snapshot: &DocumentSnapshot,
-    id: analysis::SymbolId,
-) -> Option<DocumentSymbol> {
-    analysis::document_symbol_by_id(snapshot, id).map(|symbol| document_symbol(snapshot, symbol))
 }
 
 pub(super) fn document_symbol(
@@ -235,25 +228,6 @@ pub(super) fn finish_import_completion_items(
     }
     items.sort_unstable_by(|left, right| left.sort_text.cmp(&right.sort_text));
     items
-}
-
-pub(super) fn inlay_hints(
-    snapshot: &DocumentSnapshot,
-    hints: Vec<analysis::InlayHint>,
-) -> Vec<InlayHint> {
-    hints
-        .into_iter()
-        .map(|hint| InlayHint {
-            position: position_at(snapshot, hint.position),
-            label: InlayHintLabel::String(hint.label(&snapshot.text)),
-            kind: Some(InlayHintKind::PARAMETER),
-            text_edits: None,
-            tooltip: None,
-            padding_left: None,
-            padding_right: Some(true),
-            data: None,
-        })
-        .collect()
 }
 
 pub(super) fn folding_ranges(ranges: Vec<analysis::FoldingRange>) -> Vec<FoldingRange> {

@@ -12,21 +12,23 @@ struct Nodes {
     locals: HashSet<(usize, usize, i64)>,
     /// `(binder index, name)` of each binder.
     binders: HashSet<(i64, String)>,
-    /// The start of each node that names a key, and the key.
-    named: HashSet<(usize, String)>,
-    /// Every key that the terms use.
-    keys: HashSet<String>,
+    /// The start of each node that names a key, the key, and whether the node
+    /// names a constructor.
+    named: HashSet<(usize, String, bool)>,
+    /// Every key that the terms use, and whether as a constructor.
+    keys: HashSet<(String, bool)>,
     /// The constructor keys of match arms, which have no span of their own.
     arms: HashSet<String>,
-    /// The declaration's own name and constructors.
-    declared: HashSet<String>,
+    /// The declaration's own name and constructors, each with whether it is a
+    /// constructor.
+    declared: HashSet<(String, bool)>,
 }
 
 impl Nodes {
-    fn key(&mut self, key: &str, span: Option<Span>) {
-        self.keys.insert(key.to_owned());
+    fn key(&mut self, key: &str, ctr: bool, span: Option<Span>) {
+        self.keys.insert((key.to_owned(), ctr));
         if let Some(span) = span {
-            self.named.insert((span.beg, key.to_owned()));
+            self.named.insert((span.beg, key.to_owned(), ctr));
         }
     }
 
@@ -43,7 +45,7 @@ impl Nodes {
                 self.binders.insert((var.i, var.k.clone()));
             }
             Patt::Ctr { k, x, s } => {
-                self.key(k, *s);
+                self.key(k, true, *s);
                 for field in x {
                     self.patt(field);
                 }
@@ -87,7 +89,7 @@ impl Nodes {
                 }
                 let _ = k;
             }
-            Term::Ref { k, s, .. } => self.key(k, *s),
+            Term::Ref { k, s, .. } => self.key(k, false, *s),
             Term::Sub { v, f, .. } => {
                 self.patt(v);
                 self.term(f);
@@ -115,14 +117,20 @@ impl Nodes {
                 self.binders.insert((*i, k.clone()));
                 self.term(f);
             }
-            Term::Adt { k, x, s, .. } | Term::Ctr { k, x, s } => {
-                self.key(k, *s);
+            Term::Adt { k, x, s, .. } => {
+                self.key(k, false, *s);
+                for arg in x {
+                    self.term(arg);
+                }
+            }
+            Term::Ctr { k, x, s } => {
+                self.key(k, true, *s);
                 for arg in x {
                     self.term(arg);
                 }
             }
             Term::Mat { k, h, m, .. } => {
-                self.keys.insert(k.clone());
+                self.keys.insert((k.clone(), true));
                 self.arms.insert(k.clone());
                 self.term(h);
                 self.term(m);
@@ -166,10 +174,10 @@ impl Nodes {
             nodes.term(out);
         }
         if let Some(name) = &tld.name {
-            nodes.declared.insert(name.clone());
+            nodes.declared.insert((name.clone(), false));
         }
         for (ctr, _) in tld.ctrs.iter().flatten() {
-            nodes.declared.insert(ctr.clone());
+            nodes.declared.insert((ctr.clone(), true));
         }
         nodes
     }
@@ -303,13 +311,15 @@ pub fn check(loaded: &Load) -> Vec<String> {
                 Meaning::Binder(binder) => nodes
                     .get(&binder.tld)
                     .is_some_and(|n| n.binders.contains(&(binder.index, text(span)))),
-                Meaning::Global { key } if occurrence.implicit => all.keys.contains(key),
-                Meaning::Global { key } => {
-                    all.named.contains(&(span.beg, key.clone()))
-                        || all.arms.contains(key)
-                        || loaded.book.declares(key)
+                Meaning::Global { key, ctr } if occurrence.implicit => {
+                    all.keys.contains(&(key.clone(), *ctr))
                 }
-                Meaning::Declaration { key, .. } => all.declared.contains(key),
+                Meaning::Global { key, ctr } => {
+                    all.named.contains(&(span.beg, key.clone(), *ctr))
+                        || (*ctr && all.arms.contains(key))
+                        || (!*ctr && loaded.book.tlds.contains_key(key))
+                }
+                Meaning::Declaration { key, ctr } => all.declared.contains(&(key.clone(), *ctr)),
             };
             if !ok {
                 problems.push(format!(

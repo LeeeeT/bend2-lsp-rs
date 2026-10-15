@@ -121,7 +121,8 @@ fn release_stdio_queries_observe_incremental_unsaved_workspace() {
     let compiler = compiler_fixture(temp.path());
     let main_path = workspace.join("main.bend");
     let dependency_path = workspace.join("dep.bend");
-    let disk_main = "import dep.bend as Dep\ndef main: U32\n  Dep.old(1)\n# Dep.clamp in comment\n";
+    let disk_main =
+        "import dep.bend as Dep\ndef main() -> U32:\n  Dep.old(1)\n# Dep.clamp in comment\n";
     let disk_dependency = "def old(x: U32) -> U32:\n  x\n";
     fs::write(&main_path, disk_main).must_be("write root source");
     fs::write(&dependency_path, disk_dependency).must_be("write dependency source");
@@ -354,7 +355,7 @@ fn release_compiler_lifecycle_cancels_children_and_flushes_tracing() {
     let workspace = temp.path().join("workspace");
     fs::create_dir(&workspace).must_be("create workspace");
     let path = workspace.join("main.bend");
-    let source = "def main: U32\n  1\n";
+    let source = "def main() -> U32:\n  1\n";
     fs::write(&path, source).must_be("write disk source");
     let uri = file_uri(&path);
     let compiler = compiler_fixture(temp.path());

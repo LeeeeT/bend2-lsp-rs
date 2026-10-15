@@ -116,7 +116,7 @@ mod navigation {
     }
 
     #[test]
-    fn document_links_share_definition_targets_for_base_local_and_cached_packages() {
+    fn document_links_share_definition_targets_and_skip_rejected_imports() {
         let temp = tempfile::tempdir().must_be("workspace");
         let root = temp.path();
         let hash = "0x0123456789abcdef0123456789abcdef";
@@ -125,12 +125,13 @@ mod navigation {
         fs::write(root.join("hub/names/pkg@1.0.0.0"), hash).must_be("named package mapping");
         fs::write(
             root.join("hub").join(hash).join("dep.bend"),
-            "def value = 1\n",
+            "def value() -> U32: 1\n",
         )
         .must_be("package source");
-        fs::write(root.join("dep.bend"), "def value = 2\n").must_be("local source");
-        fs::write(root.join("module"), "def value = 3\n").must_be("extensionless module source");
-        let source = "import Base # generated\nimport ./dep.bend as Local\nimport pkg@1.0.0.0/dep.bend as Package\nimport ./module as Module\nimport ./missing.bend as Missing\ndef main = Local.value\n";
+        fs::write(root.join("dep.bend"), "def value() -> U32: 2\n").must_be("local source");
+        fs::write(root.join("module"), "def value() -> U32: 3\n")
+            .must_be("extensionless module source");
+        let source = "import Base # generated\nimport ./dep.bend as Local\nimport pkg@1.0.0.0/dep.bend as Package\nimport ./module as Module\nimport ./missing.bend as Missing\ndef main() -> U32: Local.value\n";
         let main = uri(&root.join("main.bend"));
         let mut client = client(root);
         open(&mut client, &main, 1, source);
@@ -139,13 +140,16 @@ mod navigation {
             json!({"textDocument":{"uri":main}}),
         );
         let links = links["result"].as_array().must_be("document links");
-        assert_eq!(links.len(), 4, "unresolved imports must not get links");
+        assert_eq!(
+            links.len(),
+            3,
+            "imports that the compiler rejects or cannot find get no links"
+        );
         assert_eq!(links[1]["target"], uri(&root.join("dep.bend")));
         assert_eq!(
             links[2]["target"],
             uri(&root.join("hub").join(hash).join("dep.bend"))
         );
-        assert_eq!(links[3]["target"], uri(&root.join("module")));
         for (line, link) in links.iter().enumerate() {
             let definition = client.request(
                 "textDocument/definition",
@@ -163,12 +167,12 @@ mod navigation {
     }
 
     #[test]
-    fn alias_rename_changes_declaration_and_unshadowed_roots_with_utf16_ranges() {
+    fn alias_rename_changes_declaration_and_every_root_with_utf16_ranges() {
         let temp = tempfile::tempdir().must_be("workspace");
-        fs::write(temp.path().join("dep.bend"), "def value = 1\n").must_be("module source");
+        fs::write(temp.path().join("dep.bend"), "def value() -> U32: 1\n").must_be("module source");
         let main = uri(&temp.path().join("main.bend"));
-        let source = "import ./dep.bend as Dep # keep\ndef main = (\"😀\", Dep.value)\ndef shadow(Dep: U32) -> U32:\n  Dep.value\n# Dep.value\n";
-        let expected = "import ./dep.bend as Module # keep\ndef main = (\"😀\", Module.value)\ndef shadow(Dep: U32) -> U32:\n  Dep.value\n# Dep.value\n";
+        let source = "import ./dep.bend as Dep # keep\ndef main() -> U32: (\"😀\", Dep.value)\ndef shadow(Dep: U32) -> U32:\n  Dep.value\n# Dep.value\n";
+        let expected = "import ./dep.bend as Module # keep\ndef main() -> U32: (\"😀\", Module.value)\ndef shadow(Dep: U32) -> U32:\n  Module.value\n# Dep.value\n";
         let mut client = client(temp.path());
         open(&mut client, &main, 7, source);
         for offset in [
@@ -187,8 +191,25 @@ mod navigation {
     #[test]
     fn import_path_cursor_positions_reject_symbol_rename_without_alias_or_path_edits() {
         let temp = tempfile::tempdir().must_be("workspace");
-        let main = uri(&temp.path().join("main.bend"));
-        let mut client = client(temp.path());
+        let root = temp.path();
+        let hash = "0x0123456789abcdef0123456789abcdef";
+        for directory in [
+            "nested".to_owned(),
+            format!("hub/{hash}"),
+            "hub/names".to_owned(),
+        ] {
+            fs::create_dir_all(root.join(directory)).must_be("module directory");
+        }
+        fs::write(root.join("hub/names/pkg@1.0.0.0"), hash).must_be("named package mapping");
+        for module in [
+            "test.bend".to_owned(),
+            "nested/test.bend".to_owned(),
+            format!("hub/{hash}/test.bend"),
+        ] {
+            fs::write(root.join(module), "def foo() -> U32: 1\n").must_be("module source");
+        }
+        let main = uri(&root.join("main.bend"));
+        let mut client = client(root);
         // Each spelling collides with a path segment or the extension.
         for (version, path, alias) in [
             (1, "test.bend", "test"),
@@ -197,7 +218,7 @@ mod navigation {
             (4, "./nested/test.bend", "bend"),
             (5, "pkg@1.0.0.0/test.bend", "test"),
         ] {
-            let source = format!("import {path} as {alias}\ndef main = {alias}.foo\n");
+            let source = format!("import {path} as {alias}\ndef main() -> U32: {alias}.foo\n");
             if version == 1 {
                 open(&mut client, &main, version, &source);
             } else {
@@ -228,7 +249,7 @@ mod navigation {
                 assert_eq!(edit["textDocument"]["version"], version);
                 assert_eq!(
                     apply(&source, &edit["edits"]),
-                    format!("import {path} as Module\ndef main = Module.foo\n")
+                    format!("import {path} as Module\ndef main() -> U32: Module.foo\n")
                 );
             }
         }
@@ -236,22 +257,28 @@ mod navigation {
     }
 
     #[test]
-    fn rename_preview_and_edits_follow_alias_member_and_shadowed_local_in_unsaved_snapshots() {
+    fn rename_preview_and_edits_follow_alias_and_member_beside_a_same_named_local() {
         let temp = tempfile::tempdir().must_be("workspace");
         let dependency = temp.path().join("test.bend");
-        fs::write(&dependency, "def disk_only = 0\n").must_be("disk dependency");
+        fs::write(&dependency, "def disk_only() -> U32: 0\n").must_be("disk dependency");
+        fs::write(temp.path().join("other.bend"), "def bar() -> U32: 0\n")
+            .must_be("other dependency");
         let dependency_uri = uri(&dependency);
         let main_path = temp.path().join("main.bend");
-        fs::write(&main_path, "def disk_only = 0\n").must_be("disk consumer");
+        fs::write(&main_path, "def disk_only() -> U32: 0\n").must_be("disk consumer");
         let main = uri(&main_path);
-        let source = "import test.bend as Test\nimport other.bend as Other\ndef main = (\"😀\", Test.foo, Other.foo)\ndef shadow(Test: U32) -> U32:\n  Test.foo\n# Test.foo\n";
-        let dependency_source = "def foo = 1\ndef use = foo\n";
+        let source = "import test.bend as Test\nimport other.bend as Other\ndef main() -> U32: (\"😀\", Test.foo, Other.foo)\ndef shadow(Test: U32) -> U32:\n  Test.foo\n# Test.foo\n";
+        let dependency_source = "def foo() -> U32: 1\ndef use() -> U32: foo\n";
         let mut client = client(temp.path());
         open(&mut client, &dependency_uri, 3, dependency_source);
         open(&mut client, &main, 7, source);
         let declaration = source.find("Test\n").must_be("alias declaration");
         let qualifier = source.find("Test.foo").must_be("module qualifier");
-        for start in [declaration, qualifier] {
+        let beside_local = source
+            .rfind("  Test.foo")
+            .must_be("qualifier beside the local")
+            + 2;
+        for start in [declaration, qualifier, beside_local] {
             for offset in start..start + "Test".len() {
                 assert_eq!(
                     prepare(&mut client, &main, source, offset)["result"],
@@ -262,48 +289,46 @@ mod navigation {
                 assert_eq!(edit["textDocument"]["version"], 7);
                 assert_eq!(
                     apply(source, &edit["edits"]),
-                    "import test.bend as Module\nimport other.bend as Other\ndef main = (\"😀\", Module.foo, Other.foo)\ndef shadow(Test: U32) -> U32:\n  Test.foo\n# Test.foo\n"
+                    "import test.bend as Module\nimport other.bend as Other\ndef main() -> U32: (\"😀\", Module.foo, Other.foo)\ndef shadow(Test: U32) -> U32:\n  Module.foo\n# Test.foo\n",
+                    "a local never hides a qualified name"
                 );
             }
         }
-        let member = qualifier + "Test.".len();
-        for offset in member..member + "foo".len() {
-            assert_eq!(
-                prepare(&mut client, &main, source, offset)["result"],
-                preview(source, member, "foo")
-            );
-            let renamed = rename(&mut client, &main, source, offset, "bar");
-            let changes = renamed["result"]["changes"]
-                .as_object()
-                .must_be("symbol changes");
-            assert_eq!(changes.len(), 2, "{renamed}");
-            assert_eq!(
-                apply(source, &changes[&main]),
-                "import test.bend as Test\nimport other.bend as Other\ndef main = (\"😀\", Test.bar, Other.foo)\ndef shadow(Test: U32) -> U32:\n  Test.foo\n# Test.foo\n"
-            );
-            assert_eq!(
-                apply(dependency_source, &changes[&dependency_uri]),
-                "def bar = 1\ndef use = bar\n"
-            );
-        }
-        let local_declaration = source.find("Test:").must_be("local declaration");
-        let local_use = source.rfind("  Test.foo").must_be("shadowed qualifier") + 2;
-        for start in [local_declaration, local_use] {
-            for offset in start..start + "Test".len() {
+        for member in [qualifier, beside_local].map(|start| start + "Test.".len()) {
+            for offset in member..member + "foo".len() {
                 assert_eq!(
                     prepare(&mut client, &main, source, offset)["result"],
-                    preview(source, start, "Test")
+                    preview(source, member, "foo")
                 );
-                let renamed = rename(&mut client, &main, source, offset, "Local");
+                let renamed = rename(&mut client, &main, source, offset, "bar");
+                let changes = renamed["result"]["changes"]
+                    .as_object()
+                    .must_be("symbol changes");
+                assert_eq!(changes.len(), 2, "{renamed}");
                 assert_eq!(
-                    apply(source, &renamed["result"]["changes"][&main]),
-                    "import test.bend as Test\nimport other.bend as Other\ndef main = (\"😀\", Test.foo, Other.foo)\ndef shadow(Local: U32) -> U32:\n  Local.foo\n# Test.foo\n"
+                    apply(source, &changes[&main]),
+                    "import test.bend as Test\nimport other.bend as Other\ndef main() -> U32: (\"😀\", Test.bar, Other.foo)\ndef shadow(Test: U32) -> U32:\n  Test.bar\n# Test.foo\n"
+                );
+                assert_eq!(
+                    apply(dependency_source, &changes[&dependency_uri]),
+                    "def bar() -> U32: 1\ndef use() -> U32: bar\n"
                 );
             }
         }
+        let local = source.find("Test:").must_be("local declaration");
+        for offset in local..local + "Test".len() {
+            assert_eq!(
+                prepare(&mut client, &main, source, offset)["result"],
+                preview(source, local, "Test")
+            );
+            let renamed = rename(&mut client, &main, source, offset, "Local");
+            assert_eq!(
+                apply(source, &renamed["result"]["changes"][&main]),
+                "import test.bend as Test\nimport other.bend as Other\ndef main() -> U32: (\"😀\", Test.foo, Other.foo)\ndef shadow(Local: U32) -> U32:\n  Test.foo\n# Test.foo\n"
+            );
+        }
         for offset in [
-            qualifier + "Test".len(),  // separator, not either rename target
-            local_use + "Test.".len(), // unsupported member of a shadowed local
+            qualifier + "Test".len(), // separator, not either rename target
             source.find("Other.foo").must_be("unresolved qualifier") + "Other.".len(),
             source.rfind("Test.foo").must_be("comment"),
             source.find('😀').must_be("string"),
@@ -321,16 +346,26 @@ mod navigation {
     }
 
     #[test]
-    fn alias_rename_rejects_import_global_and_local_capture_conflicts() {
+    fn alias_rename_rejects_only_names_that_change_a_reading() {
         let temp = tempfile::tempdir().must_be("workspace");
+        fs::write(temp.path().join("dep.bend"), "def value() -> U32: 1\n").must_be("dependency");
+        fs::write(temp.path().join("other.bend"), "def value() -> U32: 2\n").must_be("other");
         let main = uri(&temp.path().join("main.bend"));
-        let source = "import ./dep.bend as Dep\nimport ./other.bend as Other\ndef Global = 1\ndef main(Capture: U32) -> U32:\n  Dep.value\n";
+        let source = "import ./dep.bend as Dep\nimport ./other.bend as Other\ndef Global() -> U32: 1\ndef Clash.value() -> U32: 3\ndef main(Capture: U32) -> U32:\n  Dep.value\n";
         let mut client = client(temp.path());
         open(&mut client, &main, 1, source);
         let offset = source.find("Dep\n").must_be("declaration");
-        for name in ["Other", "Global", "Capture", "two.names", "import"] {
+        for name in ["Other", "Clash", "two.names", "import"] {
             let response = rename(&mut client, &main, source, offset, name);
             assert_eq!(response["error"]["code"], -32602, "{name}: {response}");
+        }
+        for name in ["Global", "Capture"] {
+            let response = rename(&mut client, &main, source, offset, name);
+            assert_eq!(
+                apply(source, &response["result"]["documentChanges"][0]["edits"]),
+                source.replace("Dep", name),
+                "{name}: a declaration or a local of the name keeps every reading"
+            );
         }
         client.finish();
     }
@@ -345,13 +380,14 @@ mod navigation {
         let consumer = root.join("lib/consumer.bend");
         let new_target = root.join("new/renamed.bend");
         let new_consumer = root.join("new/consumer.bend");
-        fs::write(&target, "def value = 1\n").must_be("target");
-        let closed_source = "import ./dep.bend as Dep # 😀 keep alias\ndef exported = Dep.value\n";
+        fs::write(&target, "def value() -> U32: 1\n").must_be("target");
+        let closed_source =
+            "import ./dep.bend as Dep # 😀 keep alias\ndef exported() -> U32: Dep.value\n";
         fs::write(&consumer, closed_source).must_be("closed consumer");
         let main_path = root.join("main.bend");
-        fs::write(&main_path, "def disk_only = 0\n").must_be("disk differs from buffer");
+        fs::write(&main_path, "def disk_only() -> U32: 0\n").must_be("disk differs from buffer");
         let main = uri(&main_path);
-        let source = "import Base\nimport ./lib/dep.bend as Dep # unsaved\nimport ./lib/consumer.bend as Consumer\ndef main = Dep.value\n";
+        let source = "import Base\nimport ./lib/dep.bend as Dep # unsaved\nimport ./lib/consumer.bend as Consumer\ndef main() -> U32: Dep.value\n";
         let mut client = client(root);
         open(&mut client, &main, 9, source);
         let before = client.request(
@@ -374,7 +410,7 @@ mod navigation {
         let main_updated = apply(source, &main_change["edits"]);
         assert_eq!(
             main_updated,
-            "import Base\nimport ./new/renamed.bend as Dep # unsaved\nimport ./new/consumer.bend as Consumer\ndef main = Dep.value\n"
+            "import Base\nimport ./new/renamed.bend as Dep # unsaved\nimport ./new/consumer.bend as Consumer\ndef main() -> U32: Dep.value\n"
         );
         let closed_change = changes
             .iter()
@@ -384,7 +420,7 @@ mod navigation {
         let closed_updated = apply(closed_source, &closed_change["edits"]);
         assert_eq!(
             closed_updated,
-            "import ./renamed.bend as Dep # 😀 keep alias\ndef exported = Dep.value\n"
+            "import ./renamed.bend as Dep # 😀 keep alias\ndef exported() -> U32: Dep.value\n"
         );
         fs::write(&consumer, &closed_updated).must_be("client applies closed edit");
         change(&mut client, &main, 10, &main_updated);
@@ -400,7 +436,7 @@ mod navigation {
             "generated Base provenance is not relocated"
         );
         assert_eq!(links["result"][1]["target"], uri(&new_target));
-        let references = client.request("textDocument/references", json!({"textDocument":{"uri":main},"position":{"line":3,"character":17},"context":{"includeDeclaration":false}}));
+        let references = client.request("textDocument/references", json!({"textDocument":{"uri":main},"position":{"line":3,"character":25},"context":{"includeDeclaration":false}}));
         assert!(
             references["result"]
                 .as_array()
@@ -421,7 +457,7 @@ mod navigation {
         );
         assert_eq!(
             fs::read_to_string(&main_path).must_be("unchanged on-disk unsaved root"),
-            "def disk_only = 0\n"
+            "def disk_only() -> U32: 0\n"
         );
         client.finish();
     }
@@ -432,14 +468,15 @@ mod navigation {
         let root = temp.path();
         fs::create_dir_all(root.join("src")).must_be("source folder");
         fs::create_dir_all(root.join("nested")).must_be("destination parent");
-        fs::write(root.join("dé😀.bend"), "def value = 42\n").must_be("unchanged target");
-        fs::write(root.join("src/sibling.bend"), "def sibling = 1\n").must_be("co-moved target");
+        fs::write(root.join("dep.bend"), "def value() -> U32: 42\n").must_be("unchanged target");
+        fs::write(root.join("src/sibling.bend"), "def sibling() -> U32: 1\n")
+            .must_be("co-moved target");
         let old_path = root.join("src/main.bend");
         let new_path = root.join("nested/src/main.bend");
         let old_uri = uri(&old_path);
         let new_uri = uri(&new_path);
-        let source = "import ../dé😀.bend as Dep # keep\nimport sibling.bend as Sibling # unchanged spelling\ndef main = Dep.value\n";
-        fs::write(&old_path, "def disk_only = 0\n").must_be("disk source");
+        let source = "import ../dep.bend as Dep # keep 😀\nimport sibling.bend as Sibling # unchanged spelling\ndef main() -> U32: Dep.value\n";
+        fs::write(&old_path, "def disk_only() -> U32: 0\n").must_be("disk source");
         let mut client = client(root);
         open(&mut client, &old_uri, 12, source);
         let files = json!({"files":[{"oldUri":uri(&root.join("src")),"newUri":uri(&root.join("nested/src"))}]});
@@ -450,7 +487,7 @@ mod navigation {
         let updated = apply(source, &edit["edits"]);
         assert_eq!(
             updated,
-            "import ../../dé😀.bend as Dep # keep\nimport sibling.bend as Sibling # unchanged spelling\ndef main = Dep.value\n"
+            "import ../../dep.bend as Dep # keep 😀\nimport sibling.bend as Sibling # unchanged spelling\ndef main() -> U32: Dep.value\n"
         );
         change(&mut client, &old_uri, 13, &updated);
         fs::rename(root.join("src"), root.join("nested/src")).must_be("client folder move");
@@ -459,12 +496,12 @@ mod navigation {
             "textDocument/documentLink",
             json!({"textDocument":{"uri":new_uri}}),
         );
-        assert_eq!(links["result"][0]["target"], uri(&root.join("dé😀.bend")));
+        assert_eq!(links["result"][0]["target"], uri(&root.join("dep.bend")));
         assert_eq!(
             links["result"][1]["target"],
             uri(&root.join("nested/src/sibling.bend"))
         );
-        let next = "import ../../dé😀.bend as Dep # keep\nimport sibling.bend as Sibling # unchanged spelling\ndef main = Dep.value\ndef unsaved = Dep.value\n";
+        let next = "import ../../dep.bend as Dep # keep 😀\nimport sibling.bend as Sibling # unchanged spelling\ndef main() -> U32: Dep.value\ndef unsaved() -> U32: Dep.value\n";
         change(&mut client, &new_uri, 14, next);
         let renamed = rename(
             &mut client,
@@ -477,11 +514,11 @@ mod navigation {
         assert_eq!(edit["textDocument"]["version"], 14);
         assert_eq!(
             apply(next, &edit["edits"]),
-            "import ../../dé😀.bend as Module # keep\nimport sibling.bend as Sibling # unchanged spelling\ndef main = Module.value\ndef unsaved = Module.value\n"
+            "import ../../dep.bend as Module # keep 😀\nimport sibling.bend as Sibling # unchanged spelling\ndef main() -> U32: Module.value\ndef unsaved() -> U32: Module.value\n"
         );
         assert_eq!(
             fs::read_to_string(new_path).must_be("untouched disk text"),
-            "def disk_only = 0\n"
+            "def disk_only() -> U32: 0\n"
         );
         client.finish();
     }
@@ -493,10 +530,10 @@ mod navigation {
         let a = root.join("a.bend");
         let b = root.join("b.bend");
         let c = root.join("c.bend");
-        fs::write(&a, "def from_a = 1\n").must_be("first module");
-        fs::write(&b, "def from_b = 2\n").must_be("second module");
+        fs::write(&a, "def from_a() -> U32: 1\n").must_be("first module");
+        fs::write(&b, "def from_b() -> U32: 2\n").must_be("second module");
         let main = uri(&root.join("main.bend"));
-        let source = "import ./a.bend as A\nimport ./b.bend as B\ndef main = A.from_a\n";
+        let source = "import ./a.bend as A\nimport ./b.bend as B\ndef main() -> U32: A.from_a\n";
         let mut client = client(root);
         open(&mut client, &main, 1, source);
         let files = json!({"files":[{"oldUri":uri(&a),"newUri":uri(&b)},{"oldUri":uri(&b),"newUri":uri(&c)}]});
@@ -504,7 +541,7 @@ mod navigation {
         let updated = apply(source, &response["result"]["documentChanges"][0]["edits"]);
         assert_eq!(
             updated,
-            "import ./b.bend as A\nimport ./c.bend as B\ndef main = A.from_a\n"
+            "import ./b.bend as A\nimport ./c.bend as B\ndef main() -> U32: A.from_a\n"
         );
         fs::rename(&b, &c).must_be("client moves second original");
         fs::rename(&a, &b).must_be("client moves first original");
@@ -512,11 +549,16 @@ mod navigation {
         client.notify("workspace/didRenameFiles", files);
         let definition = client.request(
             "textDocument/definition",
-            json!({"textDocument":{"uri":main},"position":{"line":2,"character":16}}),
+            json!({"textDocument":{"uri":main},"position":{"line":2,"character":24}}),
         );
         assert_eq!(definition["result"]["uri"], uri(&b));
-        open(&mut client, &uri(&b), 5, "def unsaved_first = 9\n");
-        open(&mut client, &uri(&c), 8, "def unsaved_second = 10\n");
+        open(&mut client, &uri(&b), 5, "def unsaved_first() -> U32: 9\n");
+        open(
+            &mut client,
+            &uri(&c),
+            8,
+            "def unsaved_second() -> U32: 10\n",
+        );
         let collision = client.request_response(
             "workspace/willRenameFiles",
             json!({"files":[{"oldUri":uri(&b),"newUri":uri(&c)}]}),
@@ -546,10 +588,11 @@ mod navigation {
         let old = root.join("source.bend");
         let new = root.join("renamed.bend");
         let consumer = root.join("consumer.bend");
-        fs::write(&old, "def original = 1\n").must_be("source file");
+        fs::write(&old, "def original() -> U32: 1\n").must_be("source file");
         let mut closed = String::from("import ./source.bend as Source\n");
         for index in 0..4096 {
-            writeln!(&mut closed, "def closed_{index} = Source.original").must_be("closed source");
+            writeln!(&mut closed, "def closed_{index}() -> U32: Source.original")
+                .must_be("closed source");
         }
         fs::write(&consumer, &closed).must_be("closed consumer");
         let main = uri(&root.join("main.bend"));
@@ -558,9 +601,9 @@ mod navigation {
             &mut client,
             &main,
             1,
-            "import ./consumer.bend as Consumer\ndef main = Consumer.closed_0\n",
+            "import ./consumer.bend as Consumer\ndef main() -> U32: Consumer.closed_0\n",
         );
-        open(&mut client, &uri(&old), 4, "def original = 1\n");
+        open(&mut client, &uri(&old), 4, "def original() -> U32: 1\n");
         let files = json!({"files":[{"oldUri":uri(&old),"newUri":uri(&new)}]});
         let proposed = client.request("workspace/willRenameFiles", files.clone());
         let edits = proposed["result"]["documentChanges"]
@@ -575,12 +618,17 @@ mod navigation {
         fs::rename(&old, &new).must_be("client moves source");
         client.notify("workspace/didRenameFiles", files);
         let new_uri = uri(&new);
-        change(&mut client, &new_uri, 5, "def during_move = 2\n");
+        change(&mut client, &new_uri, 5, "def during_move() -> U32: 2\n");
         client.notify(
             "textDocument/didClose",
             json!({"textDocument":{"uri":new_uri}}),
         );
-        open(&mut client, &new_uri, 1, "def reopened_latest = 3\n");
+        open(
+            &mut client,
+            &new_uri,
+            1,
+            "def reopened_latest() -> U32: 3\n",
+        );
         let symbols = client.request(
             "textDocument/documentSymbol",
             json!({"textDocument":{"uri":new_uri}}),
@@ -612,7 +660,12 @@ mod navigation {
         let root = temp.path();
         let main = uri(&root.join("main.bend"));
         let mut client = client(root);
-        open(&mut client, &main, 1, "import Base\ndef main = builtin()\n");
+        open(
+            &mut client,
+            &main,
+            1,
+            "import Base\ndef main() -> U32: builtin()\n",
+        );
         let links = client.request(
             "textDocument/documentLink",
             json!({"textDocument":{"uri":main}}),
@@ -635,7 +688,7 @@ mod navigation {
         let definition = client.request(
             "textDocument/definition",
             json!({
-                "textDocument":{"uri":main},"position":{"line":1,"character":12}
+                "textDocument":{"uri":main},"position":{"line":1,"character":20}
             }),
         );
         assert_eq!(definition["result"]["uri"], base_uri);
@@ -652,10 +705,10 @@ mod navigation {
         let root = temp.path();
         let dep = root.join("dep.bend");
         let consumer = root.join("consumer.bend");
-        fs::write(&dep, "def value = 1\n").must_be("dependency");
+        fs::write(&dep, "def value() -> U32: 1\n").must_be("dependency");
         fs::write(
             &consumer,
-            "import ./dep.bend as Dep\ndef exported = Dep.value\n",
+            "import ./dep.bend as Dep\ndef exported() -> U32: Dep.value\n",
         )
         .must_be("consumer");
         let main = uri(&root.join("main.bend"));
@@ -664,16 +717,17 @@ mod navigation {
             &mut client,
             &main,
             1,
-            "import ./consumer.bend as Consumer\ndef main = Consumer.exported\n",
+            "import ./consumer.bend as Consumer\ndef main() -> U32: Consumer.exported\n",
         );
         let loaded = client.request(
             "textDocument/definition",
             json!({
-                "textDocument":{"uri":main},"position":{"line":1,"character":21}
+                "textDocument":{"uri":main},"position":{"line":1,"character":29}
             }),
         );
         assert_eq!(loaded["result"]["uri"], uri(&consumer));
-        let updated = "# external 😀 comment\nimport ./dep.bend as Dep\ndef exported = Dep.value\n";
+        let updated =
+            "# external 😀 comment\nimport ./dep.bend as Dep\ndef exported() -> U32: Dep.value\n";
         fs::write(&consumer, updated).must_be("external edit without watcher");
         let response = client.request(
             "workspace/willRenameFiles",
@@ -690,7 +744,7 @@ mod navigation {
             .must_be("closed consumer edits");
         assert_eq!(
             apply(updated, &edit["edits"]),
-            "# external 😀 comment\nimport ./renamed.bend as Dep\ndef exported = Dep.value\n"
+            "# external 😀 comment\nimport ./renamed.bend as Dep\ndef exported() -> U32: Dep.value\n"
         );
         client.finish();
     }
@@ -704,17 +758,17 @@ mod navigation {
         let dep = root.join("dep.bend");
         let old = root.join("src/module.bend");
         let new = root.join("nested/src/module.bend");
-        let source = "import ../dep.bend as Dep\ndef exported = Dep.value\n";
-        fs::write(&dep, "def value = 1\n").must_be("dependency");
+        let source = "import ../dep.bend as Dep\ndef exported() -> U32: Dep.value\n";
+        fs::write(&dep, "def value() -> U32: 1\n").must_be("dependency");
         fs::write(&old, source).must_be("importer");
         let main = uri(&root.join("main.bend"));
-        let main_source = "import ./src/module.bend as Module\nimport ./dep.bend as Direct\ndef main = Module.exported\n";
+        let main_source = "import ./src/module.bend as Module\nimport ./dep.bend as Direct\ndef main() -> U32: Module.exported\n";
         let mut client = client(root);
         open(&mut client, &main, 1, main_source);
         let loaded = client.request(
             "textDocument/definition",
             json!({
-                "textDocument":{"uri":main},"position":{"line":2,"character":19}
+                "textDocument":{"uri":main},"position":{"line":2,"character":27}
             }),
         );
         assert_eq!(loaded["result"]["uri"], uri(&old));
@@ -747,12 +801,12 @@ mod navigation {
             "textDocument/didClose",
             json!({"textDocument":{"uri":uri(&new)}}),
         );
-        let reference_source = "import ./nested/src/module.bend as Module\nimport ./dep.bend as Direct\ndef main = Direct.value\n";
+        let reference_source = "import ./nested/src/module.bend as Module\nimport ./dep.bend as Direct\ndef main() -> U32: Direct.value\n";
         change(&mut client, &main, 3, reference_source);
         let references = client.request(
             "textDocument/references",
             json!({
-                "textDocument":{"uri":main},"position":{"line":2,"character":19},
+                "textDocument":{"uri":main},"position":{"line":2,"character":27},
                 "context":{"includeDeclaration":false}
             }),
         );
@@ -776,15 +830,15 @@ mod navigation {
         std::os::unix::fs::symlink("real", root.join("link")).must_be("directory alias");
         let dep = root.join("real/dep.bend");
         let new = root.join("real/renamed.bend");
-        fs::write(&dep, "def value = 1\n").must_be("dependency");
+        fs::write(&dep, "def value() -> U32: 1\n").must_be("dependency");
         let main = uri(&root.join("main.bend"));
-        let source = "import ./link/dep.bend as Dep\ndef main = Dep.value\n";
+        let source = "import ./link/dep.bend as Dep\ndef main() -> U32: Dep.value\n";
         let mut client = client(root);
         open(&mut client, &main, 1, source);
         let before = client.request(
             "textDocument/definition",
             json!({
-                "textDocument":{"uri":main},"position":{"line":1,"character":16}
+                "textDocument":{"uri":main},"position":{"line":1,"character":24}
             }),
         );
         assert_eq!(before["result"]["uri"], uri(&root.join("link/dep.bend")));
@@ -794,7 +848,7 @@ mod navigation {
         let updated = apply(source, edits);
         assert_eq!(
             updated,
-            "import ./real/renamed.bend as Dep\ndef main = Dep.value\n"
+            "import ./real/renamed.bend as Dep\ndef main() -> U32: Dep.value\n"
         );
         change(&mut client, &main, 2, &updated);
         fs::rename(&dep, &new).must_be("client moves physical target");
@@ -802,7 +856,7 @@ mod navigation {
         let after = client.request(
             "textDocument/definition",
             json!({
-                "textDocument":{"uri":main},"position":{"line":1,"character":16}
+                "textDocument":{"uri":main},"position":{"line":1,"character":24}
             }),
         );
         assert_eq!(after["result"]["uri"], uri(&new));

@@ -3,7 +3,7 @@ use std::{
     hash::{Hash, Hasher},
 };
 
-use super::{InlayHint, LineIndex, SymbolKind, TextRange};
+use super::{LineIndex, SymbolKind, TextRange};
 
 #[path = "syntax/completion.rs"]
 mod completion;
@@ -13,15 +13,9 @@ mod declarations;
 mod scanner;
 
 use declarations::{
-    build_lines, declaration_tokens, parse_bindings, parse_constructors, parse_imports,
-    parse_symbols,
+    build_lines, declaration_tokens, parse_constructors, parse_imports, parse_symbols,
 };
 use scanner::Scanner;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct CasePatternType {
-    pub explicit_type: Option<TextRange>,
-}
 
 const KEYWORDS: &[&str] = &[
     "def", "law", "type", "is", "match", "case", "do", "return", "for", "exs", "where", "import",
@@ -140,7 +134,6 @@ pub struct IndexedSymbol {
     pub name: NameId,
     pub name_range: TextRange,
     pub detail_range: TextRange,
-    pub parameter_span: TextRange,
     pub scope: TextRange,
     pub kind: SymbolKind,
     pub start_line: usize,
@@ -193,16 +186,6 @@ struct AuxiliaryData {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct IndexedBinding {
-    pub id: SymbolId,
-    pub name: NameId,
-    pub name_range: TextRange,
-    pub scope: TextRange,
-    pub owner: SymbolId,
-    pub declaration: TokenId,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ReferenceKind {
     Declaration,
     Read,
@@ -216,15 +199,11 @@ pub struct Reference {
     pub qualifier_token: Option<TokenId>,
     pub token: TokenId,
     pub range: TextRange,
-    pub enclosing: Option<SymbolId>,
     pub kind: ReferenceKind,
-    pub resolved: Option<SymbolId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CallSite {
-    pub caller: Option<SymbolId>,
-    pub callee: Option<SymbolId>,
     pub name: NameId,
     pub qualifier: Option<NameId>,
     pub qualifier_token: Option<TokenId>,
@@ -243,24 +222,12 @@ struct DelimiterPair {
     close: TokenId,
 }
 
-struct BindingContext<'a> {
-    source: &'a str,
-    lines: &'a [SyntaxLine],
-    tokens: &'a [Token],
-    delimiter_pairs: &'a [DelimiterPair],
-    delimiter_context: &'a [IndexSlot],
-    symbol_count: usize,
-    names: &'a NameTable,
-}
-
 struct CallInputs<'a> {
     source: &'a str,
     tokens: &'a [Token],
     delimiter_pairs: &'a [DelimiterPair],
     delimiter_context: &'a [IndexSlot],
     symbols: &'a [IndexedSymbol],
-    bindings: &'a [IndexedBinding],
-    token_symbols: &'a [IndexSlot],
     names: &'a mut NameTable,
 }
 
@@ -269,29 +236,16 @@ struct CallBuild<'a> {
     tokens: &'a [Token],
     delimiter_pairs: &'a [DelimiterPair],
     delimiter_context: &'a [IndexSlot],
-    symbols: &'a [IndexedSymbol],
-    token_symbols: &'a [IndexSlot],
     declarations: &'a [bool],
     names: &'a mut NameTable,
 }
 
-#[derive(Debug, Eq, PartialEq)]
-struct ParameterHint {
-    position: usize,
-    binding: usize,
-}
-
 struct CallIndex {
     calls: Vec<CallSite>,
-    parameter_hints: Vec<ParameterHint>,
     arguments: Vec<TextRange>,
     separators: Vec<usize>,
     by_open: Vec<IndexSlot>,
     by_name_token: Vec<IndexSlot>,
-    from_indices: Vec<usize>,
-    from_spans: Vec<TextRange>,
-    to_indices: Vec<usize>,
-    to_spans: Vec<TextRange>,
 }
 
 struct ReferenceInputs<'a> {
@@ -300,17 +254,11 @@ struct ReferenceInputs<'a> {
     identifier_count: usize,
     names: &'a mut NameTable,
     symbols: &'a [IndexedSymbol],
-    bindings: &'a [IndexedBinding],
-    token_symbols: &'a [IndexSlot],
     calls: &'a [CallSite],
 }
 
 struct ReferenceIndex {
     references: Vec<Reference>,
-    by_symbol_indices: Vec<usize>,
-    by_symbol_spans: Vec<TextRange>,
-    by_name_indices: Vec<usize>,
-    by_name_spans: Vec<TextRange>,
     token_references: Vec<IndexSlot>,
 }
 
@@ -405,26 +353,15 @@ fn keyword_name_flags(source: &str, names: &NameTable) -> Vec<bool> {
 #[derive(Debug, Eq, PartialEq)]
 pub struct SyntaxIndex {
     tokens: Box<[Token]>,
-    semantic_token_count: usize,
-    parameter_hints: Box<[ParameterHint]>,
     names: NameTable,
     keyword_names: Box<[bool]>,
     imports: Box<[IndexedImport]>,
     symbols: Box<[IndexedSymbol]>,
-    bindings: Box<[IndexedBinding]>,
     references: Box<[Reference]>,
-    reference_indices: Box<[usize]>,
-    reference_spans: Box<[TextRange]>,
-    name_reference_indices: Box<[usize]>,
-    name_reference_spans: Box<[TextRange]>,
     token_references: Box<[IndexSlot]>,
     calls: Box<[CallSite]>,
     call_arguments: Box<[TextRange]>,
     call_separators: Box<[usize]>,
-    calls_from_indices: Box<[usize]>,
-    calls_from_spans: Box<[TextRange]>,
-    calls_to_indices: Box<[usize]>,
-    calls_to_spans: Box<[TextRange]>,
     call_by_open: Box<[IndexSlot]>,
     call_by_name_token: Box<[IndexSlot]>,
     lines: Box<[SyntaxLine]>,
@@ -432,7 +369,6 @@ pub struct SyntaxIndex {
     delimiter_pairs: Box<[DelimiterPair]>,
     delimiter_context: Box<[IndexSlot]>,
     symbol_by_name: Box<[IndexSlot]>,
-    token_symbols: Box<[IndexSlot]>,
     completion: completion::CompletionIndex,
 }
 
@@ -457,7 +393,6 @@ impl SyntaxIndex {
         let lines = build_lines(source, line_index);
         let ScanOutput {
             tokens,
-            semantic_token_count,
             identifier_count,
             mut names,
             diagnostics,
@@ -480,34 +415,12 @@ impl SyntaxIndex {
             None
         };
         let auxiliary = AuxiliaryIndex::new(diagnostics, constructor_index);
-        let bindings = parse_bindings(
-            &BindingContext {
-                source,
-                lines: &lines,
-                tokens: &tokens,
-                delimiter_pairs: &delimiter_pairs,
-                delimiter_context: &delimiter_context,
-                symbol_count: symbols.len(),
-                names: &names,
-            },
-            &mut symbols,
-        );
-        let token_symbols = resolve_symbols(
-            source,
-            &tokens,
-            &names,
-            &symbols,
-            &bindings,
-            &symbol_by_name,
-        );
         let calls = build_calls(CallInputs {
             source,
             tokens: &tokens,
             delimiter_pairs: &delimiter_pairs,
             delimiter_context: &delimiter_context,
             symbols: &symbols,
-            bindings: &bindings,
-            token_symbols: &token_symbols,
             names: &mut names,
         });
         let references = build_references(ReferenceInputs {
@@ -516,32 +429,19 @@ impl SyntaxIndex {
             identifier_count,
             names: &mut names,
             symbols: &symbols,
-            bindings: &bindings,
-            token_symbols: &token_symbols,
             calls: &calls.calls,
         });
         let mut index = Self {
             tokens: tokens.into_boxed_slice(),
-            semantic_token_count,
-            parameter_hints: calls.parameter_hints.into_boxed_slice(),
             names,
             imports: parse_imports(source, &lines).into_boxed_slice(),
             keyword_names: keyword_names.into_boxed_slice(),
             symbols: symbols.into_boxed_slice(),
-            bindings: bindings.into_boxed_slice(),
             references: references.references.into_boxed_slice(),
-            reference_indices: references.by_symbol_indices.into_boxed_slice(),
-            reference_spans: references.by_symbol_spans.into_boxed_slice(),
-            name_reference_indices: references.by_name_indices.into_boxed_slice(),
-            name_reference_spans: references.by_name_spans.into_boxed_slice(),
             token_references: references.token_references.into_boxed_slice(),
             calls: calls.calls.into_boxed_slice(),
             call_arguments: calls.arguments.into_boxed_slice(),
             call_separators: calls.separators.into_boxed_slice(),
-            calls_from_indices: calls.from_indices.into_boxed_slice(),
-            calls_from_spans: calls.from_spans.into_boxed_slice(),
-            calls_to_indices: calls.to_indices.into_boxed_slice(),
-            calls_to_spans: calls.to_spans.into_boxed_slice(),
             call_by_open: calls.by_open.into_boxed_slice(),
             call_by_name_token: calls.by_name_token.into_boxed_slice(),
             lines: lines.into_boxed_slice(),
@@ -549,7 +449,6 @@ impl SyntaxIndex {
             delimiter_pairs: delimiter_pairs.into_boxed_slice(),
             delimiter_context: delimiter_context.into_boxed_slice(),
             symbol_by_name,
-            token_symbols: token_symbols.into_boxed_slice(),
             completion: completion::CompletionIndex::default(),
         };
         index.completion = completion::CompletionIndex::build(source, &index);
@@ -577,22 +476,6 @@ impl SyntaxIndex {
         &self.tokens
     }
 
-    pub(crate) const fn semantic_token_count(&self) -> usize {
-        self.semantic_token_count
-    }
-
-    pub(crate) fn parameter_hints(&self, range: TextRange) -> impl Iterator<Item = InlayHint> {
-        let start = self
-            .parameter_hints
-            .partition_point(|hint| hint.position < range.start);
-        let hints = &self.parameter_hints[start..];
-        let end = hints.partition_point(|hint| hint.position <= range.end);
-        hints[..end].iter().map(|hint| InlayHint {
-            position: hint.position,
-            parameter_name: self.bindings[hint.binding].name_range,
-        })
-    }
-
     #[must_use]
     pub fn imports(&self) -> &[IndexedImport] {
         &self.imports
@@ -601,89 +484,6 @@ impl SyntaxIndex {
     #[must_use]
     pub fn symbols(&self) -> &[IndexedSymbol] {
         &self.symbols
-    }
-
-    #[must_use]
-    pub fn parameters(&self, symbol: &IndexedSymbol) -> &[IndexedBinding] {
-        &self.bindings[symbol.parameter_span.start..symbol.parameter_span.end]
-    }
-
-    /// Borrow in-scope binding candidates from the current function's dense rows.
-    /// No source parsing or workspace traversal is performed by this query.
-    pub fn bindings_at(&self, offset: usize) -> impl Iterator<Item = &IndexedBinding> {
-        // A caret at EOF belongs to the final indexed scope, whose byte range
-        // is half-open. Compare its left-hand byte without slicing UTF-8 text.
-        let end = self.lines.last().map_or(0, |line| line.full_end);
-        let offset = offset.min(end.saturating_sub(1));
-        let symbol = self
-            .symbols
-            .partition_point(|symbol| symbol.scope.start <= offset)
-            .checked_sub(1)
-            .and_then(|index| self.symbols.get(index))
-            .filter(|symbol| symbol.kind == SymbolKind::Function && symbol.scope.contains(offset));
-        let bindings = symbol.map_or(&[][..], |symbol| {
-            let start = self
-                .bindings
-                .partition_point(|binding| binding.owner.0 < symbol.id.0);
-            let end = self
-                .bindings
-                .partition_point(|binding| binding.owner.0 <= symbol.id.0);
-            &self.bindings[start..end]
-        });
-        bindings
-            .iter()
-            .filter(move |binding| binding.scope.contains(offset))
-    }
-
-    #[inline]
-    #[must_use]
-    pub fn binding_type_range(&self, source: &str, id: SymbolId) -> Option<TextRange> {
-        let binding = self.binding_by_id(id)?;
-        let owner = self.symbols.get(binding.owner.0)?;
-        let binding_index = id.0.checked_sub(self.symbols.len())?;
-        if !owner.parameter_span.contains(binding_index)
-            || self.token_text(source, TokenId(binding.declaration.0 + 1)) != Some(":")
-        {
-            return None;
-        }
-        let open = self
-            .delimiter_context
-            .get(binding.declaration.0)
-            .copied()
-            .and_then(IndexSlot::value)
-            .map(TokenId)?;
-        let close = self
-            .delimiter_pairs
-            .binary_search_by_key(&open, |pair| pair.open)
-            .map_or_else(
-                |_| {
-                    self.tokens
-                        .partition_point(|token| token.range.start < owner.detail_range.end)
-                },
-                |index| self.delimiter_pairs[index].close.0,
-            );
-        let start = binding.declaration.0 + 2;
-        let tokens = self.tokens.get(start..close)?;
-        // Parameter identity and nesting are already indexed. Inspect only the
-        // local type-token span, never reparse a declaration or the source file.
-        let end = tokens
-            .iter()
-            .enumerate()
-            .position(|(offset, token)| {
-                let index = start + offset;
-                token.kind == TokenKind::Punctuation
-                    && self.delimiter_context[index].value() == Some(open.0)
-                    && self.token_text(source, TokenId(index)) == Some(",")
-            })
-            .unwrap_or(tokens.len());
-        let annotation = &tokens[..end];
-        let first = annotation
-            .iter()
-            .find(|token| token.kind != TokenKind::Comment)?;
-        let last = annotation
-            .iter()
-            .rfind(|token| token.kind != TokenKind::Comment)?;
-        Some(TextRange::new(first.range.start, last.range.end))
     }
 
     #[must_use]
@@ -807,61 +607,6 @@ impl SyntaxIndex {
     }
 
     #[must_use]
-    pub fn binding_by_id(&self, id: SymbolId) -> Option<&IndexedBinding> {
-        self.bindings.get(id.0.checked_sub(self.symbols.len())?)
-    }
-
-    #[must_use]
-    pub fn symbol_for_token(&self, token: TokenId) -> Option<SymbolId> {
-        self.token_symbols
-            .get(token.0)
-            .copied()
-            .and_then(IndexSlot::value)
-            .map(SymbolId)
-    }
-
-    #[must_use]
-    pub fn symbol_name(&self, id: SymbolId) -> Option<NameId> {
-        self.symbol_by_id(id)
-            .map(|symbol| symbol.name)
-            .or_else(|| self.binding_by_id(id).map(|binding| binding.name))
-    }
-
-    #[must_use]
-    pub fn symbol_declaration_range(&self, id: SymbolId) -> Option<TextRange> {
-        self.symbol_by_id(id)
-            .map(|symbol| symbol.name_range)
-            .or_else(|| self.binding_by_id(id).map(|binding| binding.name_range))
-    }
-
-    pub fn references(&self, id: SymbolId) -> impl Iterator<Item = &Reference> {
-        let span = self.reference_spans.get(id.0).copied().unwrap_or_default();
-        self.reference_indices[span.start..span.end]
-            .iter()
-            .map(|index| &self.references[*index])
-    }
-
-    pub fn references_named(&self, name: NameId) -> impl Iterator<Item = &Reference> {
-        let span = self
-            .name_reference_spans
-            .get(name.0)
-            .copied()
-            .unwrap_or_default();
-        self.name_reference_indices[span.start..span.end]
-            .iter()
-            .map(|index| &self.references[*index])
-    }
-
-    pub fn qualified_references(&self, root: NameId) -> impl Iterator<Item = &Reference> {
-        self.references.iter().filter(move |reference| {
-            reference
-                .qualifier_token
-                .and_then(|token| self.name_for_token(token))
-                == Some(root)
-        })
-    }
-
-    #[must_use]
     pub fn reference_for_token(&self, token: TokenId) -> Option<&Reference> {
         let index = self.token_references.get(token.0)?.value()?;
         self.references.get(index)
@@ -870,20 +615,6 @@ impl SyntaxIndex {
     #[must_use]
     pub fn calls(&self) -> &[CallSite] {
         &self.calls
-    }
-
-    pub fn calls_from(&self, symbol: SymbolId) -> impl Iterator<Item = &CallSite> {
-        let span = self.calls_from_spans.get(symbol.0).copied();
-        span.into_iter()
-            .flat_map(|span| self.calls_from_indices[span.start..span.end].iter())
-            .map(|index| &self.calls[*index])
-    }
-
-    pub fn calls_to(&self, symbol: SymbolId) -> impl Iterator<Item = &CallSite> {
-        let span = self.calls_to_spans.get(symbol.0).copied();
-        span.into_iter()
-            .flat_map(|span| self.calls_to_indices[span.start..span.end].iter())
-            .map(|index| &self.calls[*index])
     }
 
     #[must_use]
@@ -980,10 +711,10 @@ impl SyntaxIndex {
             .map(|index| self.delimiter_pairs[index].close)
     }
 
-    /// An indexed pattern context; an absent explicit type keeps constructor choices unrestricted.
+    /// Whether `offset` is in the patterns of a `case`.
     #[must_use]
-    pub fn case_pattern_type(&self, offset: usize) -> Option<CasePatternType> {
-        self.completion.pattern_type(offset)
+    pub fn in_case_pattern(&self, offset: usize) -> bool {
+        self.completion.in_case_pattern(offset)
     }
 
     #[must_use]
@@ -1000,7 +731,6 @@ fn hash_name(name: &str) -> u64 {
 
 struct ScanOutput {
     tokens: Vec<Token>,
-    semantic_token_count: usize,
     identifier_count: usize,
     names: NameTable,
     diagnostics: Vec<SyntaxDiagnostic>,
@@ -1010,72 +740,6 @@ struct ScanOutput {
     line_ascii: Vec<u64>,
 }
 
-fn resolve_symbols(
-    source: &str,
-    tokens: &[Token],
-    names: &NameTable,
-    symbols: &[IndexedSymbol],
-    bindings: &[IndexedBinding],
-    symbol_by_name: &[IndexSlot],
-) -> Vec<IndexSlot> {
-    let mut token_symbols = vec![IndexSlot::EMPTY; tokens.len()];
-    for symbol in symbols {
-        let start = tokens.partition_point(|token| token.range.end <= symbol.name_range.start);
-        let end = tokens.partition_point(|token| token.range.start < symbol.name_range.end);
-        for (offset, token) in tokens[start..end].iter().enumerate() {
-            let index = start + offset;
-            if token.kind == TokenKind::Identifier {
-                token_symbols[index] = IndexSlot::some(symbol.id.0);
-            }
-        }
-    }
-    let mut bindings_by_name = HashMap::<NameId, Vec<usize>>::new();
-    for (index, binding) in bindings.iter().enumerate() {
-        token_symbols[binding.declaration.0] = IndexSlot::some(binding.id.0);
-        bindings_by_name
-            .entry(binding.name)
-            .or_default()
-            .push(index);
-    }
-    for (index, token) in tokens.iter().enumerate() {
-        if token.kind != TokenKind::Identifier || token_symbols[index].value().is_some() {
-            continue;
-        }
-        let token_id = TokenId(index);
-        let symbol = if is_qualified_token(source, tokens, index)
-            && qualified_chain_start(source, tokens, index) != index
-        {
-            qualified_symbol_for_token(source, tokens, index, names, symbol_by_name)
-        } else {
-            let name = names.for_token(token_id);
-            name.and_then(|name| {
-                bindings_by_name
-                    .get(&name)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|binding| {
-                        let binding = bindings[*binding];
-                        binding
-                            .scope
-                            .contains(token.range.start)
-                            .then_some((binding.scope.end - binding.scope.start, binding.id))
-                    })
-                    .min_by_key(|(scope_size, _)| *scope_size)
-                    .map(|(_, id)| id)
-                    .or_else(|| {
-                        symbol_by_name
-                            .get(name.0)
-                            .copied()
-                            .and_then(IndexSlot::value)
-                            .map(SymbolId)
-                    })
-            })
-        };
-        token_symbols[index] = IndexSlot::from_option(symbol.map(|id| id.0));
-    }
-    token_symbols
-}
-
 fn build_calls(input: CallInputs<'_>) -> CallIndex {
     let CallInputs {
         source,
@@ -1083,23 +747,18 @@ fn build_calls(input: CallInputs<'_>) -> CallIndex {
         delimiter_pairs,
         delimiter_context,
         symbols,
-        bindings,
-        token_symbols,
         names,
     } = input;
-    let declarations = declaration_tokens(tokens, symbols, bindings);
+    let declarations = declaration_tokens(tokens, symbols);
     let mut context = CallBuild {
         source,
         tokens,
         delimiter_pairs,
         delimiter_context,
-        symbols,
-        token_symbols,
         declarations: &declarations,
         names,
     };
     let mut calls = Vec::new();
-    let mut inlay_hint_count = 0;
     let mut arguments = Vec::new();
     let mut separators = Vec::new();
     let mut by_open = vec![IndexSlot::EMPTY; tokens.len()];
@@ -1122,77 +781,15 @@ fn build_calls(input: CallInputs<'_>) -> CallIndex {
         if let Some(qualifier_token) = call.qualifier_token {
             by_name_token[qualifier_token.0] = IndexSlot::some(call_index);
         }
-        if let Some(symbol) = call
-            .callee
-            .and_then(|id| symbols.get(id.0))
-            .filter(|symbol| symbol.kind == SymbolKind::Function)
-        {
-            inlay_hint_count += (call.argument_indices.end - call.argument_indices.start)
-                .min(symbol.parameter_span.end - symbol.parameter_span.start);
-        }
         calls.push(call);
     }
-    let parameter_hints = if inlay_hint_count == 0 {
-        Vec::new()
-    } else {
-        build_parameter_hints(&calls, &arguments, symbols, inlay_hint_count)
-    };
-    let id_count = symbols.len() + bindings.len();
-    let (from_indices, from_spans) =
-        compact_groups(&calls, id_count, |call| call.caller.map(|id| id.0));
-    let (to_indices, to_spans) =
-        compact_groups(&calls, id_count, |call| call.callee.map(|id| id.0));
     CallIndex {
         calls,
-        parameter_hints,
         arguments,
         separators,
         by_open,
         by_name_token,
-        from_indices,
-        from_spans,
-        to_indices,
-        to_spans,
     }
-}
-
-fn build_parameter_hints(
-    calls: &[CallSite],
-    arguments: &[TextRange],
-    symbols: &[IndexedSymbol],
-    capacity: usize,
-) -> Vec<ParameterHint> {
-    let mut hints: Vec<ParameterHint> = Vec::with_capacity(capacity);
-    for call in calls {
-        let Some(symbol) = call
-            .callee
-            .and_then(|id| symbols.get(id.0))
-            .filter(|symbol| symbol.kind == SymbolKind::Function)
-        else {
-            continue;
-        };
-        for (argument, binding) in arguments[call.argument_indices.start..call.argument_indices.end]
-            .iter()
-            .zip(symbol.parameter_span.start..symbol.parameter_span.end)
-        {
-            let hint = ParameterHint {
-                position: argument.start,
-                binding,
-            };
-            // Calls arrive in source order; nested calls can interleave only
-            // with the pending argument suffix of their enclosing calls.
-            if hints
-                .last()
-                .is_none_or(|previous| previous.position <= hint.position)
-            {
-                hints.push(hint);
-            } else {
-                let index = hints.partition_point(|previous| previous.position <= hint.position);
-                hints.insert(index, hint);
-            }
-        }
-    }
-    hints
 }
 
 fn parse_call(
@@ -1259,8 +856,6 @@ fn parse_call(
         arguments.push(range);
     }
     Some(CallSite {
-        caller: enclosing_function(context.symbols, callee_token.range.start),
-        callee: context.token_symbols[callee_index].value().map(SymbolId),
         name,
         qualifier,
         qualifier_token,
@@ -1281,8 +876,6 @@ fn build_references(input: ReferenceInputs<'_>) -> ReferenceIndex {
         identifier_count,
         names,
         symbols,
-        bindings,
-        token_symbols,
         calls,
     } = input;
     let mut references = Vec::with_capacity(identifier_count);
@@ -1291,13 +884,7 @@ fn build_references(input: ReferenceInputs<'_>) -> ReferenceIndex {
     for call in calls {
         call_tokens[call.callee_token.0] = true;
     }
-    append_declaration_references(
-        tokens,
-        symbols,
-        bindings,
-        &mut references,
-        &mut token_references,
-    );
+    append_declaration_references(tokens, symbols, &mut references, &mut token_references);
     for (token_index, token) in tokens.iter().enumerate() {
         if token.kind != TokenKind::Identifier || token_references[token_index].value().is_some() {
             continue;
@@ -1325,30 +912,16 @@ fn build_references(input: ReferenceInputs<'_>) -> ReferenceIndex {
             qualifier_token,
             token: token_id,
             range: token.range,
-            enclosing: enclosing_function(symbols, token.range.start),
             kind: if call_tokens[token_index] {
                 ReferenceKind::Call
             } else {
                 ReferenceKind::Read
             },
-            resolved: token_symbols[token_index].value().map(SymbolId),
         });
         token_references[token_index] = IndexSlot::some(index);
     }
-    let (by_symbol_indices, by_symbol_spans) =
-        compact_groups(&references, symbols.len() + bindings.len(), |reference| {
-            reference.resolved.map(|id| id.0)
-        });
-    let (by_name_indices, by_name_spans) =
-        compact_groups(&references, names.ranges.len(), |reference| {
-            Some(reference.name.0)
-        });
     ReferenceIndex {
         references,
-        by_symbol_indices,
-        by_symbol_spans,
-        by_name_indices,
-        by_name_spans,
         token_references,
     }
 }
@@ -1356,7 +929,6 @@ fn build_references(input: ReferenceInputs<'_>) -> ReferenceIndex {
 fn append_declaration_references(
     tokens: &[Token],
     symbols: &[IndexedSymbol],
-    bindings: &[IndexedBinding],
     references: &mut Vec<Reference>,
     token_references: &mut [IndexSlot],
 ) {
@@ -1377,9 +949,7 @@ fn append_declaration_references(
             qualifier_token: None,
             token: TokenId(token_index),
             range: symbol.name_range,
-            enclosing: None,
             kind: ReferenceKind::Declaration,
-            resolved: Some(symbol.id),
         });
         for (offset, token) in tokens[start..end].iter().enumerate() {
             if token.kind == TokenKind::Identifier {
@@ -1387,57 +957,6 @@ fn append_declaration_references(
             }
         }
     }
-    for binding in bindings {
-        let index = references.len();
-        references.push(Reference {
-            name: binding.name,
-            qualifier: None,
-            qualifier_token: None,
-            token: binding.declaration,
-            range: binding.name_range,
-            enclosing: Some(binding.owner),
-            kind: ReferenceKind::Declaration,
-            resolved: Some(binding.id),
-        });
-        token_references[binding.declaration.0] = IndexSlot::some(index);
-    }
-}
-
-fn compact_groups<T>(
-    items: &[T],
-    group_count: usize,
-    key: impl Fn(&T) -> Option<usize>,
-) -> (Vec<usize>, Vec<TextRange>) {
-    let mut counts = vec![0; group_count];
-    for item in items {
-        if let Some(group) = key(item).filter(|group| *group < group_count) {
-            counts[group] += 1;
-        }
-    }
-    let mut spans = Vec::with_capacity(group_count);
-    let mut total = 0;
-    for count in &mut counts {
-        let end = total + *count;
-        spans.push(TextRange::new(total, end));
-        *count = total;
-        total = end;
-    }
-    let mut indices = vec![0; total];
-    for (index, item) in items.iter().enumerate() {
-        if let Some(group) = key(item).filter(|group| *group < group_count) {
-            indices[counts[group]] = index;
-            counts[group] += 1;
-        }
-    }
-    (indices, spans)
-}
-
-fn enclosing_function(symbols: &[IndexedSymbol], offset: usize) -> Option<SymbolId> {
-    let index = symbols
-        .partition_point(|symbol| symbol.scope.start <= offset)
-        .checked_sub(1)?;
-    let symbol = symbols[index];
-    (symbol.kind == SymbolKind::Function && symbol.scope.contains(offset)).then_some(symbol.id)
 }
 
 fn qualified_chain_start(source: &str, tokens: &[Token], mut index: usize) -> usize {
@@ -1464,54 +983,4 @@ fn trimmed_range(source: &str, start: usize, end: usize) -> Option<TextRange> {
         start + prefix,
         start + prefix + trimmed.len(),
     ))
-}
-
-fn is_qualified_token(source: &str, tokens: &[Token], index: usize) -> bool {
-    let token = tokens[index];
-    let adjacent_dot = |dot: Token, name: Token| {
-        dot.kind == TokenKind::Punctuation
-            && &source[dot.range.start..dot.range.end] == "."
-            && dot.range.end == name.range.start
-    };
-    index > 0 && adjacent_dot(tokens[index - 1], token)
-        || index + 1 < tokens.len() && adjacent_dot(tokens[index + 1], token)
-}
-
-fn qualified_symbol_for_token(
-    source: &str,
-    tokens: &[Token],
-    index: usize,
-    names: &NameTable,
-    symbol_by_name: &[IndexSlot],
-) -> Option<SymbolId> {
-    let mut start = index;
-    while start >= 2
-        && tokens[start - 1].kind == TokenKind::Punctuation
-        && &source[tokens[start - 1].range.start..tokens[start - 1].range.end] == "."
-        && tokens[start - 1].range.end == tokens[start].range.start
-        && tokens[start - 2].kind == TokenKind::Identifier
-        && tokens[start - 2].range.end == tokens[start - 1].range.start
-    {
-        start -= 2;
-    }
-    let mut end = index + 1;
-    while end + 1 < tokens.len()
-        && tokens[end].kind == TokenKind::Punctuation
-        && &source[tokens[end].range.start..tokens[end].range.end] == "."
-        && tokens[end - 1].range.end == tokens[end].range.start
-        && tokens[end + 1].kind == TokenKind::Identifier
-        && tokens[end].range.end == tokens[end + 1].range.start
-    {
-        end += 2;
-    }
-    if end - start < 3 {
-        return None;
-    }
-    let range = TextRange::new(tokens[start].range.start, tokens[end - 1].range.end);
-    let name = names.find(source, &source[range.start..range.end])?;
-    symbol_by_name
-        .get(name.0)
-        .copied()
-        .and_then(IndexSlot::value)
-        .map(SymbolId)
 }

@@ -1,134 +1,174 @@
 use super::super::{
     adapters,
-    features::{
-        call_hierarchy_item, cursor_in_comment_or_string, type_hierarchy_item,
-        type_hierarchy_symbol,
-    },
+    features::cursor_in_comment_or_string,
     lsp::Backend,
+    semantics::{file_uri, lsp_range, name_at, named_range},
 };
-use super::shared::declaration_token_at;
-use crate::analysis;
-use crate::resolve::{self, Declaration, Module, Target};
+use crate::frontend::Meaning;
+use crate::semantic::{Declaration, DeclarationKind, Identity, Semantics, Target};
+use std::collections::BTreeMap;
 use tower_lsp::{
     jsonrpc::Result,
     lsp_types::{
         CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
         CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
-        Range, SymbolKind, TypeHierarchyItem, TypeHierarchyPrepareParams,
+        Position, Range, SymbolKind, TypeHierarchyItem, TypeHierarchyPrepareParams,
         TypeHierarchySubtypesParams, TypeHierarchySupertypesParams,
     },
 };
+use url::Url;
+
+fn symbol_kind(kind: DeclarationKind) -> SymbolKind {
+    match kind {
+        DeclarationKind::Def | DeclarationKind::Law => SymbolKind::FUNCTION,
+        DeclarationKind::Type => SymbolKind::STRUCT,
+        DeclarationKind::Constructor => SymbolKind::CONSTRUCTOR,
+    }
+}
+
+/// The URI and range of a declaration of a loaded file.
+fn place(semantics: &Semantics, declaration: &Declaration) -> Option<(Url, Range)> {
+    let file = semantics.file(&declaration.identity.path)?;
+    let uri = file_uri(&declaration.identity.path)?;
+    Some((uri, lsp_range(&file.source, declaration.range)))
+}
+
+fn call_item(semantics: &Semantics, declaration: &Declaration) -> Option<CallHierarchyItem> {
+    let (uri, range) = place(semantics, declaration)?;
+    Some(CallHierarchyItem {
+        name: declaration.identity.name.clone(),
+        kind: symbol_kind(declaration.kind),
+        tags: None,
+        detail: Some(declaration.detail.clone()),
+        uri,
+        range,
+        selection_range: range,
+        data: None,
+    })
+}
+
+fn type_item(semantics: &Semantics, declaration: &Declaration) -> Option<TypeHierarchyItem> {
+    let (uri, range) = place(semantics, declaration)?;
+    Some(TypeHierarchyItem {
+        name: declaration.identity.name.clone(),
+        kind: symbol_kind(declaration.kind),
+        tags: None,
+        detail: Some(declaration.detail.clone()),
+        uri,
+        range,
+        selection_range: range,
+        data: None,
+    })
+}
+
+fn is_function(declaration: &Declaration) -> bool {
+    matches!(
+        declaration.kind,
+        DeclarationKind::Def | DeclarationKind::Law
+    )
+}
 
 impl Backend {
+    /// The declaration that the cursor names.
+    async fn declaration_at(
+        &self,
+        uri: &Url,
+        position: Position,
+    ) -> Option<(std::sync::Arc<Semantics>, Identity)> {
+        let document = self.document(uri)?;
+        if !Self::supported(&document) {
+            return None;
+        }
+        let offset = adapters::offset_at(&document, position);
+        if cursor_in_comment_or_string(&document, offset) {
+            return None;
+        }
+        let semantics = self.semantics(uri).await?;
+        let Target::Global(identity) = semantics.target(name_at(&semantics, offset)?) else {
+            return None;
+        };
+        Some((semantics, identity))
+    }
+
+    /// The semantics of the file that declares an item, and the item.
+    async fn item_declaration(
+        &self,
+        item_uri: &Url,
+        name: &str,
+        kind: SymbolKind,
+    ) -> Option<(std::sync::Arc<Semantics>, Identity)> {
+        let semantics = self.semantics(item_uri).await?;
+        let path = semantics.entry()?.path.clone();
+        let identity = Identity {
+            path,
+            name: name.to_owned(),
+            ctr: kind == SymbolKind::CONSTRUCTOR,
+        };
+        semantics.declaration(&identity)?;
+        Some((semantics, identity))
+    }
+
     pub(in crate::server) async fn handle_prepare_call_hierarchy(
         &self,
         params: CallHierarchyPrepareParams,
     ) -> Result<Option<Vec<CallHierarchyItem>>> {
-        let _workspace_read = self
-            .document_read_with_prelude(&params.text_document_position_params.text_document.uri)
-            .await;
         let td = params.text_document_position_params;
-        let Some(doc) = self.document(&td.text_document.uri) else {
+        let _workspace_read = self.document_read_with_prelude(&td.text_document.uri).await;
+        let Some((semantics, identity)) = self
+            .declaration_at(&td.text_document.uri, td.position)
+            .await
+        else {
             return Ok(None);
         };
-        if !Self::supported(&doc) {
-            return Ok(None);
-        }
-        let offset = adapters::offset_at(&doc, td.position);
-        if cursor_in_comment_or_string(&doc, offset) {
-            return Ok(None);
-        }
-        let selected = doc.syntax.token_at_or_before(offset).filter(|token| {
-            doc.syntax.token(*token).is_some_and(|token| {
-                token.kind == analysis::TokenKind::Identifier
-                    && token.range.start <= offset
-                    && offset <= token.range.end
-            })
-        });
-        let resolved = selected
-            .and_then(|token| doc.syntax.symbol_for_token(token))
-            .filter(|symbol| {
-                doc.syntax
-                    .symbol_by_id(*symbol)
-                    .is_some_and(|symbol| symbol.kind == analysis::SymbolKind::Function)
-            })
-            .map(|symbol| (doc.uri.clone(), doc.snapshot.clone(), symbol))
-            .or_else(|| {
-                let token = selected?;
-                let call = doc.syntax.call_for_token(token)?;
-                let target = resolve::call_target(self, &doc.uri, &doc.snapshot, call)?;
-                let symbol = target.symbol();
-                Some((target.module.uri, target.module.snapshot, symbol))
-            });
-        let Some((uri, snapshot, symbol)) = resolved else {
-            return Ok(None);
-        };
-        let Some(symbol) = adapters::document_symbol_by_id(&snapshot, symbol) else {
-            return Ok(None);
-        };
-        Ok(Some(vec![call_hierarchy_item(uri, symbol)]))
+        let item = semantics
+            .declaration(&identity)
+            .filter(|declaration| is_function(declaration))
+            .and_then(|declaration| call_item(&semantics, declaration));
+        Ok(item.map(|item| vec![item]))
     }
 
     pub(in crate::server) async fn handle_incoming_calls(
         &self,
         params: CallHierarchyIncomingCallsParams,
     ) -> Result<Option<Vec<CallHierarchyIncomingCall>>> {
-        let _workspace_read = self.workspace_ready_read().await;
-        let target = params.item;
-        let mut calls = Vec::<(CallHierarchyItem, Vec<Range>)>::new();
-        for caller_doc in self.hierarchy_documents() {
-            if !Self::supported(&caller_doc) {
+        let _workspace_read = self.workspace_read_with_prelude(None).await;
+        let item = params.item;
+        let Some((_, target)) = self
+            .item_declaration(&item.uri, &item.name, item.kind)
+            .await
+        else {
+            return Ok(Some(Vec::new()));
+        };
+        let mut calls: BTreeMap<(String, String), (CallHierarchyItem, Vec<Range>)> =
+            BTreeMap::new();
+        for (_, semantics) in self.workspace_semantics().await {
+            let Some(entry) = semantics.entry() else {
                 continue;
-            }
-            for call in caller_doc.syntax.calls() {
-                let Some(caller_id) = call.caller else {
-                    continue;
-                };
-                let Some(Target {
-                    module:
-                        Module {
-                            uri: target_uri,
-                            snapshot: target_snapshot,
-                        },
-                    declaration: Declaration::Symbol(target_id),
-                }) = resolve::call_target(self, &caller_doc.uri, &caller_doc.snapshot, call)
-                else {
-                    continue;
-                };
-                if target_uri != target.uri
-                    || target_snapshot
-                        .syntax
-                        .symbol_by_id(target_id)
-                        .is_none_or(|symbol| {
-                            target_snapshot
-                                .syntax
-                                .name_text(&target_snapshot.text, symbol.name)
-                                != target.name
-                        })
+            };
+            for name in &entry.names {
+                if matches!(name.meaning, Meaning::Declaration { .. })
+                    || semantics.target(name) != Target::Global(target.clone())
                 {
                     continue;
                 }
-                let Some(caller_symbol) = adapters::document_symbol_by_id(&caller_doc, caller_id)
-                else {
+                let Some(caller) = semantics.holder(name.tld) else {
                     continue;
                 };
-                let range = adapters::range(&caller_doc, call.callee_range);
-                if let Some((_, ranges)) = calls
-                    .iter_mut()
-                    .find(|(item, _)| item.uri == caller_doc.uri && item.name == caller_symbol.name)
-                {
-                    ranges.push(range);
-                } else {
-                    calls.push((
-                        call_hierarchy_item(caller_doc.uri.clone(), caller_symbol),
-                        vec![range],
-                    ));
-                }
+                let Some(caller_item) = call_item(&semantics, caller) else {
+                    continue;
+                };
+                let key = (caller_item.uri.to_string(), caller_item.name.clone());
+                let range = lsp_range(&entry.source, named_range(&entry.source, name, &target));
+                calls
+                    .entry(key)
+                    .or_insert_with(|| (caller_item, Vec::new()))
+                    .1
+                    .push(range);
             }
         }
         Ok(Some(
             calls
-                .into_iter()
+                .into_values()
                 .map(|(from, from_ranges)| CallHierarchyIncomingCall { from, from_ranges })
                 .collect(),
         ))
@@ -141,50 +181,45 @@ impl Backend {
         let _workspace_read = self
             .workspace_read_with_prelude(Some(&params.item.uri))
             .await;
-        let caller_item = params.item;
-        let Some(caller_doc) = self.hierarchy_document(&caller_item.uri) else {
-            return Ok(Some(Vec::new()));
-        };
-        let Some(caller_id) = caller_doc
-            .syntax
-            .name_id(&caller_doc.text, &caller_item.name)
-            .and_then(|name| caller_doc.syntax.symbol_by_name(name))
-            .filter(|symbol| symbol.kind == analysis::SymbolKind::Function)
-            .map(|symbol| symbol.id)
+        let item = params.item;
+        let Some((semantics, origin)) = self
+            .item_declaration(&item.uri, &item.name, item.kind)
+            .await
         else {
             return Ok(Some(Vec::new()));
         };
-        let mut calls = Vec::<(CallHierarchyItem, Vec<Range>)>::new();
-        for call in caller_doc.syntax.calls_from(caller_id) {
-            let Some(Target {
-                module:
-                    Module {
-                        uri: target_uri,
-                        snapshot: target_snapshot,
-                    },
-                declaration: Declaration::Symbol(target_id),
-            }) = resolve::call_target(self, &caller_doc.uri, &caller_doc.snapshot, call)
+        let Some(entry) = semantics.entry() else {
+            return Ok(Some(Vec::new()));
+        };
+        let mut calls: BTreeMap<(String, String), (CallHierarchyItem, Vec<Range>)> =
+            BTreeMap::new();
+        for name in &entry.names {
+            if semantics.holder(name.tld).map(|holder| &holder.identity) != Some(&origin) {
+                continue;
+            }
+            let Target::Global(callee) = semantics.target(name) else {
+                continue;
+            };
+            let Some(declaration) = semantics
+                .declaration(&callee)
+                .filter(|declaration| is_function(declaration) && callee != origin)
             else {
                 continue;
             };
-            let Some(target) = adapters::document_symbol_by_id(&target_snapshot, target_id) else {
+            let Some(callee_item) = call_item(&semantics, declaration) else {
                 continue;
             };
-            if let Some((_, ranges)) = calls
-                .iter_mut()
-                .find(|(item, _)| item.uri == target_uri && item.name == target.name)
-            {
-                ranges.push(adapters::range(&caller_doc, call.callee_range));
-            } else {
-                calls.push((
-                    call_hierarchy_item(target_uri, target),
-                    vec![adapters::range(&caller_doc, call.callee_range)],
-                ));
-            }
+            let key = (callee_item.uri.to_string(), callee_item.name.clone());
+            let range = lsp_range(&entry.source, named_range(&entry.source, name, &callee));
+            calls
+                .entry(key)
+                .or_insert_with(|| (callee_item, Vec::new()))
+                .1
+                .push(range);
         }
         Ok(Some(
             calls
-                .into_iter()
+                .into_values()
                 .map(|(to, from_ranges)| CallHierarchyOutgoingCall { to, from_ranges })
                 .collect(),
         ))
@@ -194,68 +229,70 @@ impl Backend {
         &self,
         params: TypeHierarchyPrepareParams,
     ) -> Result<Option<Vec<TypeHierarchyItem>>> {
-        let _workspace_read = self
-            .document_read_with_prelude(&params.text_document_position_params.text_document.uri)
-            .await;
         let td = params.text_document_position_params;
-        let Some(doc) = self.document(&td.text_document.uri) else {
+        let _workspace_read = self.document_read_with_prelude(&td.text_document.uri).await;
+        let Some((semantics, identity)) = self
+            .declaration_at(&td.text_document.uri, td.position)
+            .await
+        else {
             return Ok(None);
         };
-        if !Self::supported(&doc) {
-            return Ok(None);
-        }
-        let offset = adapters::offset_at(&doc, td.position);
-        let Some(token) = declaration_token_at(&doc, offset) else {
-            return Ok(None);
-        };
-        let Some((uri, source, name)) = self.hierarchy_source(&doc, &token) else {
-            return Ok(None);
-        };
-        let Some((symbol, _)) = type_hierarchy_symbol(&source, &name) else {
-            return Ok(None);
-        };
-        Ok(Some(vec![type_hierarchy_item(uri, symbol)]))
+        let item = semantics
+            .declaration(&identity)
+            .filter(|declaration| {
+                matches!(
+                    declaration.kind,
+                    DeclarationKind::Type | DeclarationKind::Constructor
+                )
+            })
+            .and_then(|declaration| type_item(&semantics, declaration));
+        Ok(item.map(|item| vec![item]))
     }
 
     pub(in crate::server) async fn handle_supertypes(
         &self,
         params: TypeHierarchySupertypesParams,
     ) -> Result<Option<Vec<TypeHierarchyItem>>> {
-        let _workspace_read = self.document_read(&params.item.uri).await;
+        let _workspace_read = self.document_read_with_prelude(&params.item.uri).await;
         let item = params.item;
-        let Some(doc) = self.hierarchy_document(&item.uri) else {
+        let Some((semantics, identity)) = self
+            .item_declaration(&item.uri, &item.name, item.kind)
+            .await
+        else {
             return Ok(Some(Vec::new()));
         };
-        let parent = adapters::document_symbols(&doc).into_iter().find(|symbol| {
-            symbol.kind == SymbolKind::STRUCT
-                && symbol
-                    .children
-                    .as_ref()
-                    .is_some_and(|children| children.iter().any(|child| child.name == item.name))
-        });
-        Ok(Some(
-            parent
-                .map(|symbol| vec![type_hierarchy_item(doc.uri, symbol)])
-                .unwrap_or_default(),
-        ))
+        let parent = semantics
+            .declaration(&identity)
+            .filter(|declaration| declaration.kind == DeclarationKind::Constructor)
+            .and_then(|declaration| semantics.holder(declaration.tld))
+            .and_then(|parent| type_item(&semantics, parent));
+        Ok(Some(parent.into_iter().collect()))
     }
 
     pub(in crate::server) async fn handle_subtypes(
         &self,
         params: TypeHierarchySubtypesParams,
     ) -> Result<Option<Vec<TypeHierarchyItem>>> {
-        let _workspace_read = self.document_read(&params.item.uri).await;
+        let _workspace_read = self.document_read_with_prelude(&params.item.uri).await;
         let item = params.item;
-        let Some(doc) = self.hierarchy_document(&item.uri) else {
+        let Some((semantics, identity)) = self
+            .item_declaration(&item.uri, &item.name, item.kind)
+            .await
+        else {
             return Ok(Some(Vec::new()));
         };
-        let children = adapters::document_symbols(&doc)
-            .into_iter()
-            .find(|symbol| symbol.kind == SymbolKind::STRUCT && symbol.name == item.name)
-            .and_then(|symbol| symbol.children)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|symbol| type_hierarchy_item(doc.uri.clone(), symbol))
+        let Some(declaration) = semantics
+            .declaration(&identity)
+            .filter(|declaration| declaration.kind == DeclarationKind::Type)
+        else {
+            return Ok(Some(Vec::new()));
+        };
+        let children = semantics
+            .declarations_in(&identity.path)
+            .filter(|child| {
+                child.kind == DeclarationKind::Constructor && child.tld == declaration.tld
+            })
+            .filter_map(|child| type_item(&semantics, child))
             .collect();
         Ok(Some(children))
     }

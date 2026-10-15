@@ -483,7 +483,7 @@ impl WorkspaceDb {
     ) -> Vec<(Document, String, Vec<analysis::Completion>)> {
         self.import_candidates_matching(source, |snapshot| {
             let items = if in_case_pattern {
-                analysis::constructor_completion_items(snapshot, None, prefix)
+                analysis::constructor_completion_items(snapshot, prefix)
             } else {
                 analysis::module_completion_items(snapshot, prefix)
             };
@@ -1289,7 +1289,7 @@ pub(super) fn normalize_path(path: &Path) -> PathBuf {
     }
     normalized
 }
-fn hub_library_path() -> Option<PathBuf> {
+pub(crate) fn hub_library_path() -> Option<PathBuf> {
     let path = std::env::var_os("BEND_LIB")
         .map(PathBuf::from)
         .or_else(|| {

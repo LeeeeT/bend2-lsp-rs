@@ -154,6 +154,8 @@ pub(super) struct Parse<'a> {
     pub frs: i64,
     pub tlds: &'a mut Vec<TldTrace>,
     pub events: &'a mut Vec<Recorded>,
+    /// Keep the events of a declaration that fails.
+    pub partial: bool,
 }
 
 impl Parse<'_> {
@@ -171,9 +173,10 @@ impl Parse<'_> {
         }
     }
 
-    fn implicit(&mut self, key: &str, span: Option<Span>) {
+    fn implicit(&mut self, key: &str, ctr: bool, span: Option<Span>) {
         let meaning = Meaning::Global {
             key: key.to_owned(),
+            ctr,
         };
         self.record(span, Event::Settled(meaning), true);
     }
@@ -433,7 +436,10 @@ impl Parse<'_> {
         }
         let key = self.reso(name)?;
         if name.contains('.') {
-            let global = Meaning::Global { key: key.clone() };
+            let global = Meaning::Global {
+                key: key.clone(),
+                ctr: false,
+            };
             self.record(span, Event::Settled(global), implicit);
             return Ok(Term::reference(key, span));
         }
@@ -463,27 +469,17 @@ impl Parse<'_> {
     }
 
     fn reso(&self, name: &str) -> Result<String> {
-        let mut key = self.qual(name);
-        if let Some(dot) = name.find('.')
-            && let Some(sub) = self.alias(&name[..dot])
-        {
-            key = format!("{sub}:{}", &name[dot + 1..]);
-            if key != name && self.book.declares(&key) && self.book.declares(name) {
-                let exp = format!(
-                    "an unambiguous name (the alias {} shadows {name})",
-                    &name[..dot]
-                );
-                return Err(self.fail(exp));
-            }
-        }
-        let own = self.book.declares(&key);
-        let far = self.book.declares(name);
-        Ok(if own || !far { key } else { name.to_owned() })
+        resolve(self.book, self.ns, self.al, name).ok_or_else(|| {
+            let alias = name.split('.').next().unwrap_or(name);
+            self.fail(format!(
+                "an unambiguous name (the alias {alias} shadows {name})"
+            ))
+        })
     }
 
     fn call(&mut self, name: &str, args: Vec<Term>, span: Option<Span>) -> Result<Term> {
         let key = self.reso(name)?;
-        self.implicit(&key, span);
+        self.implicit(&key, false, span);
         let head = Term::reference(key, span);
         Ok(args
             .into_iter()
@@ -566,7 +562,7 @@ impl Parse<'_> {
                 let mut keys = Vec::new();
                 literal_ctrs(&stepped, &mut keys);
                 for key in keys {
-                    self.implicit(&key, *s);
+                    self.implicit(&key, true, *s);
                 }
                 self.patt(&stepped)
             }
@@ -684,7 +680,11 @@ impl Parse<'_> {
         if self.take("{") {
             let args = self.term_args("}")?;
             let key = self.reso(&word)?;
-            self.explicit(token, Meaning::Global { key: key.clone() });
+            let meaning = Meaning::Global {
+                key: key.clone(),
+                ctr: true,
+            };
+            self.explicit(token, meaning);
             return Ok(Term::ctr(key, args, None));
         }
         let span = Some(self.span(beg));
@@ -700,6 +700,7 @@ impl Parse<'_> {
             token,
             Meaning::Global {
                 key: family.clone(),
+                ctr: false,
             },
         );
         let args = self.term_args(">")?;
@@ -719,7 +720,7 @@ impl Parse<'_> {
         }
         let span = Some(self.span(beg));
         let value = Term::number("U32", u64::from(code), span);
-        self.implicit("Chr", span);
+        self.implicit("Chr", true, span);
         Ok(Term::ctr("Chr", vec![value], span))
     }
 
@@ -736,7 +737,7 @@ impl Parse<'_> {
         let literal = lit_of(&codes, span);
         if let Term::Ctr { .. } = literal {
             for key in ["SCon", "Chr", "SNil"] {
-                self.implicit(key, span);
+                self.implicit(key, true, span);
             }
         }
         Ok(literal)
@@ -760,7 +761,10 @@ impl Parse<'_> {
             return Ok(Term::var(k.clone(), -1, span));
         }
         if !matches!(term, Term::Adt { .. }) {
-            let meaning = Meaning::Global { key: key.clone() };
+            let meaning = Meaning::Global {
+                key: key.clone(),
+                ctr: false,
+            };
             self.settle(term.span(), Event::Settled(meaning));
         }
         let is_adt = matches!(term, Term::Adt { .. });
@@ -820,7 +824,10 @@ impl Parse<'_> {
             {
                 let arm = self.term(0)?;
                 let key = self.reso(k)?;
-                let meaning = Meaning::Global { key: key.clone() };
+                let meaning = Meaning::Global {
+                    key: key.clone(),
+                    ctr: true,
+                };
                 self.settle(term.span(), Event::Settled(meaning));
                 arms.push((key, arm));
                 self.skip();
@@ -926,7 +933,7 @@ impl Parse<'_> {
         }
         let span = Some(self.span(beg));
         let index = self.open("_");
-        self.implicit("Empty", operator);
+        self.implicit("Empty", false, operator);
         let empty = Term::reference("Empty", operator);
         Ok(Term::all(Quant::Lone, "_", index, equal(span), empty, span))
     }
@@ -946,9 +953,9 @@ impl Parse<'_> {
         self.take(",");
         items.extend(self.term_args("]")?);
         let span = Some(self.span(beg));
-        self.implicit("Nil", span);
+        self.implicit("Nil", true, span);
         if !items.is_empty() {
-            self.implicit("Con", span);
+            self.implicit("Con", true, span);
         }
         Ok(items
             .into_iter()
@@ -978,7 +985,7 @@ impl Parse<'_> {
             }
             depth = Term::number("Nat", u64::from(total.trailing_zeros()), depth.span());
         }
-        self.implicit("Array.new", span);
+        self.implicit("Array.new", false, span);
         let head = Term::reference("Array.new", span);
         let typed = Term::app(Term::app(head, ty, span), depth, span);
         Ok(Term::app(typed, item, span))
@@ -1079,15 +1086,15 @@ impl Parse<'_> {
         self.term_ns(&mut index, &Term::reference("U32", span))?;
         self.skip();
         let word = Term::reference("U32", span);
-        self.implicit("U32", span);
+        self.implicit("U32", false, span);
         if !self.nl() && self.take("<-") {
-            self.implicit("Array.set", span);
+            self.implicit("Array.set", false, span);
             let value = self.term(2)?;
             let head = Term::app(Term::reference("Array.set", span), word, span);
             let written = Term::app(Term::app(head, array, span), index, span);
             return Ok(Term::app(written, value, span));
         }
-        self.implicit("Array.get", span);
+        self.implicit("Array.get", false, span);
         let head = Term::app(Term::reference("Array.get", span), word, span);
         Ok(Term::app(Term::app(head, array, span), index, span))
     }
@@ -1154,11 +1161,11 @@ impl Parse<'_> {
                 s: span,
             },
             "<>" => {
-                self.implicit(infix.name, span);
+                self.implicit(infix.name, true, span);
                 Term::ctr(infix.name, vec![out, rhs], span)
             }
             "&" | "|" => {
-                self.implicit(infix.name, span);
+                self.implicit(infix.name, false, span);
                 let head = Term::reference(infix.name, span);
                 Term::app(Term::app(head, out, span), rhs, span)
             }
@@ -1166,7 +1173,7 @@ impl Parse<'_> {
                 if infix.name.starts_with('.') {
                     self.record(operator, Event::Operator, true);
                 } else {
-                    self.implicit(infix.name, operator);
+                    self.implicit(infix.name, false, operator);
                 }
                 let head = Term::reference(infix.name, operator);
                 Term::app(Term::app(head, out, span), rhs, span)
@@ -1184,6 +1191,7 @@ impl Parse<'_> {
         let family = self.reso(&name)?;
         let meaning = Meaning::Global {
             key: family.clone(),
+            ctr: false,
         };
         self.settle(head, Event::Settled(meaning));
         let mut args = vec![first];
@@ -1228,7 +1236,10 @@ impl Parse<'_> {
                 .rev()
                 .find(|record| Some(record.span) == operator && record.event == Event::Operator)
             {
-                record.event = Event::Settled(Meaning::Global { key: key.clone() });
+                record.event = Event::Settled(Meaning::Global {
+                    key: key.clone(),
+                    ctr: false,
+                });
             }
             if let Term::Ref { k, .. } = head_mut(term) {
                 *k = key;
@@ -1276,7 +1287,7 @@ impl Parse<'_> {
         self.close(depth);
         if exists {
             let span = Some(self.span(beg));
-            self.implicit("Exists", span);
+            self.implicit("Exists", false, span);
             let head = Term::app(Term::reference("Exists", span), domain, span);
             return Ok(Term::app(
                 head,
@@ -1297,7 +1308,7 @@ impl Parse<'_> {
         {
             let rest = self.term_tup(beg)?;
             let span = Some(self.span(beg));
-            self.implicit("Tuple", span);
+            self.implicit("Tuple", true, span);
             return Ok(Term::ctr("Tuple", vec![(**first).clone(), rest], span));
         }
         let mut out = self.flatten(&body, Vec::new())?;
@@ -1398,7 +1409,7 @@ impl Parse<'_> {
             return Ok(Term::number("Nat", number + value, span));
         }
         if number > NAT_LITERAL_MAX {
-            self.implicit("Nat.add", span);
+            self.implicit("Nat.add", false, span);
             let head = Term::app(
                 Term::reference("Nat.add", span),
                 Term::number("Nat", number, span),
@@ -1407,7 +1418,7 @@ impl Parse<'_> {
             return Ok(Term::app(head, out, span));
         }
         if number > 0 {
-            self.implicit("Succ", span);
+            self.implicit("Succ", true, span);
         }
         for _ in 0..number {
             out = Term::ctr("Succ", vec![out], span);
@@ -1502,7 +1513,7 @@ impl Parse<'_> {
         let key = self.reso(monad)?;
         let span = value.span();
         let ty = if self.book.adt(&key).is_some() {
-            self.implicit(&key, span);
+            self.implicit(&key, false, span);
             Term::Adt {
                 k: key,
                 x: shared(args.to_vec()),
@@ -1827,7 +1838,10 @@ impl Parse<'_> {
             self.fresh_name(&name, false, "a fresh name")?
         };
         let meaning = if law.is_some() {
-            Meaning::Global { key: key.clone() }
+            Meaning::Global {
+                key: key.clone(),
+                ctr: false,
+            }
         } else {
             Meaning::Declaration {
                 key: key.clone(),
@@ -2055,7 +2069,7 @@ impl Parse<'_> {
             if clause.all {
                 Term::all(clause.quant, clause.name, clause.index, clause.ty, ty, span)
             } else {
-                self.implicit("Exists", span);
+                self.implicit("Exists", false, span);
                 let head = Term::app(Term::reference("Exists", span), clause.ty, span);
                 let body = Term::lam(clause.name, clause.index, ty, span, None);
                 Term::app(head, body, span)
@@ -2109,7 +2123,7 @@ impl Parse<'_> {
             self.explicit(token, Meaning::Binder(self.binder(index)));
             let witness = self.term(0)?;
             self.close(depth);
-            self.implicit("Exists", where_span);
+            self.implicit("Exists", false, where_span);
             let head = Term::app(Term::reference("Exists", where_span), ty, span);
             ty = Term::app(
                 head,
@@ -2139,7 +2153,9 @@ impl Parse<'_> {
             self.close(0);
             let start = self.events.len();
             if let Err(error) = self.declaration() {
-                self.events.truncate(start);
+                if !self.partial {
+                    self.events.truncate(start);
+                }
                 return Err(error);
             }
         }
@@ -2186,6 +2202,28 @@ struct Clause {
     index: i64,
     ty: Term,
     span: Option<Span>,
+}
+
+/// `parse_reso`: the book key that `name` names in the file with namespace
+/// `ns` and aliases `al`, or `None` when an alias makes it ambiguous.
+#[must_use]
+pub fn resolve(book: &Book, ns: &str, al: &[(String, String)], name: &str) -> Option<String> {
+    let mut key = if ns.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{ns}:{name}")
+    };
+    if let Some(dot) = name.find('.')
+        && let Some((_, sub)) = al.iter().find(|(alias, _)| *alias == name[..dot])
+    {
+        key = format!("{sub}:{}", &name[dot + 1..]);
+        if key != name && book.declares(&key) && book.declares(name) {
+            return None;
+        }
+    }
+    let own = book.declares(&key);
+    let far = book.declares(name);
+    Some(if own || !far { key } else { name.to_owned() })
 }
 
 fn head_mut(term: &mut Term) -> &mut Term {

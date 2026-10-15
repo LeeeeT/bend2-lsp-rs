@@ -13,8 +13,11 @@ mod term;
 mod trace;
 
 pub use book::{Adt, Book, CtrDecl, Def, Tld};
-pub use load::{Disk, Env, Files, Load, LoadedFile, load};
+pub use load::{
+    Disk, Env, ErrorText, Files, Load, LoadedFile, ReadingFile, Scope, load, load_partial,
+};
 pub use occurrence::{Binder, Meaning, Occurrence};
+pub use parse::resolve;
 pub use term::{Body, Case, Cell, LitValue, PVar, Patt, Quant, Span, Term};
 pub use trace::{TldTrace, TraceKind, error_json, json_string};
 

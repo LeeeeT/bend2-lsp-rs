@@ -28,7 +28,8 @@ each entry whose lines differ.
 
 - each occurrence must agree with the terms that the parser built: a local at
   a span with the variable of that binder, a binder with a binder node of that
-  index and name, a global with a node of that key;
+  index and name, a global with a node of that key: a constructor use with a
+  constructor node or a match arm, another use with a reference or type node;
 - each identifier token of each file must have an occurrence.
 
 ## Running

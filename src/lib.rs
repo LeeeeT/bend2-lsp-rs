@@ -1,6 +1,6 @@
 pub mod analysis;
 pub mod frontend;
-pub mod resolve;
+pub mod semantic;
 mod server;
 pub mod workspace;
 

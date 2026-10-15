@@ -3,7 +3,10 @@ use crate::{
     analysis::{DocumentSnapshot, Reference, ReferenceKind, TextRange, TokenId, TokenKind},
     workspace::{Document, WorkspaceDb},
 };
-use std::{borrow::Cow, collections::HashMap};
+use std::{
+    borrow::Cow,
+    collections::{HashMap, HashSet},
+};
 use tower_lsp::lsp_types::{
     DocumentChanges, OneOf, OptionalVersionedTextDocumentIdentifier, TextDocumentEdit, TextEdit,
     WorkspaceEdit,
@@ -41,24 +44,8 @@ pub(super) fn unresolved_reference(document: &Document, offset: usize) -> Option
         return None;
     }
     let reference = syntax.reference_for_token(token)?;
-    if reference.kind == ReferenceKind::Declaration
-        || reference.resolved.is_some()
-        || syntax.is_keyword(reference.name)
-    {
+    if reference.kind == ReferenceKind::Declaration || syntax.is_keyword(reference.name) {
         return None;
-    }
-    if let Some(qualifier) = reference.qualifier {
-        let qualifier = syntax.name_text(&document.text, qualifier);
-        if syntax
-            .imports()
-            .iter()
-            .any(|import| import.alias_text(&document.text) == Some(qualifier))
-            || reference
-                .qualifier_token
-                .is_some_and(|token| syntax.symbol_for_token(token).is_some())
-        {
-            return None;
-        }
     }
     Some(reference)
 }
@@ -68,19 +55,20 @@ pub(super) struct AutoImportPlan {
     pub(super) import_edit: Option<TextEdit>,
 }
 
+/// How to import `name` from `path` and spell it at the cursor. `locals` are
+/// the local binders in scope there, when they are known: a local hides an
+/// unqualified Base name, but never a qualified one.
 pub(super) fn auto_import_plan(
     document: &Document,
     workspace: &WorkspaceDb,
     target: &Url,
     path: &str,
     name: &str,
-    offset: usize,
+    locals: Option<&HashSet<String>>,
 ) -> Option<AutoImportPlan> {
     let syntax = &document.syntax;
     if path == "Base"
-        && (syntax
-            .bindings_at(offset)
-            .any(|binding| syntax.name_text(&document.text, binding.name) == name)
+        && (locals.is_none_or(|locals| locals.contains(name))
             || syntax
                 .name_id(&document.text, name)
                 .and_then(|name| syntax.symbol_by_name(name))
@@ -104,9 +92,6 @@ pub(super) fn auto_import_plan(
                 });
             }
             if let Some(existing) = import.alias_text(&document.text)
-                && !syntax
-                    .bindings_at(offset)
-                    .any(|binding| syntax.name_text(&document.text, binding.name) == existing)
                 && syntax
                     .name_id(&document.text, existing)
                     .and_then(|name| syntax.symbol_by_name(name))
@@ -151,6 +136,7 @@ pub(super) fn auto_import_edits(
     target: &Url,
     path: &str,
     reference: &Reference,
+    locals: Option<&HashSet<String>>,
 ) -> Option<Vec<TextEdit>> {
     let syntax = &document.syntax;
     let plan = auto_import_plan(
@@ -159,7 +145,7 @@ pub(super) fn auto_import_edits(
         target,
         path,
         syntax.name_text(&document.text, reference.name),
-        reference.range.start,
+        locals,
     )?;
     let mut edits = Vec::with_capacity(2);
     if let Some(edit) = plan.import_edit {

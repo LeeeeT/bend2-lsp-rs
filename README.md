@@ -108,21 +108,27 @@ Changing these settings clears the cached `Base` module and rechecks open files.
 “Supported” means the feature is implemented; its UI still depends on your
 editor. Source-based features are **not** a full compiler type checker.
 
+Name features use the meaning that the compiler gives each name. The server
+loads each document with `src/frontend`, a port of the compiler's loader and
+parser. The [front end oracle](tools/oracle/README.md) checks that the port
+builds exactly what the compiler builds. A document that the compiler cannot
+load gives no meaning to its names, so name features return no result there.
+
 | Feature | Support and scope |
 | --- | --- |
 | Diagnostics | Local lexical checks plus errors from the installed Bend CLI; see limitations below |
-| Completion | Fuzzy ranked names, UTF-16 identifier replacement edits, scoped bindings, explicit-type constructor filtering in nested case patterns, imported members, `Base`, indexed import paths, and indexed symbols with acceptance-time auto-imports |
+| Completion | Fuzzy ranked names, UTF-16 identifier replacement edits, the locals in scope at the cursor, only constructors in case patterns, imported members, `Base`, indexed import paths, and indexed symbols with checked acceptance-time auto-imports |
 | Signature help | Function parameters and the active argument |
 | Hover | Declaration-derived information; not inferred types for arbitrary expressions |
 | Go to definition | Indexed declarations, ADT constructors, and resolved imports |
 | Go to type definition | Declaration-derived type navigation |
-| Find references | Indexed symbol occurrences in the loaded workspace graph |
-| Rename | Indexed symbols and module aliases; client-driven file/folder rename updates imports and indexed identities |
-| Document highlights | Matching symbol occurrences in the current document |
+| Find references | The names that the compiler reads as the declaration, in the indexed workspace documents |
+| Rename | Declarations, locals, and module aliases, checked by a reload of each edited document; client-driven file/folder rename updates imports and indexed identities |
+| Document highlights | The names in the current document that mean the same thing |
 | Document symbols | Outline of declarations in a document |
 | Workspace symbols | Search over indexed workspace documents; not a scan of every file on disk |
 | Semantic highlighting | Full-document semantic tokens |
-| Code actions | Auto-import of available indexed symbols, comment-preserving organize imports, and missing closing delimiters |
+| Code actions | Checked auto-import for names that the compiler cannot resolve, comment-preserving organize imports, and missing closing delimiters |
 | Inlay hints | Argument-name hints; not inferred-type hints |
 | Code lenses | Reference counts |
 | Call hierarchy | Incoming/outgoing calls through indexed declarations and local imports |
@@ -130,7 +136,7 @@ editor. Source-based features are **not** a full compiler type checker.
 | Formatting | Whole document, selected range, and on-type formatting triggered by newline |
 | Folding | Foldable source regions |
 | Selection ranges | Expand selection through enclosing source ranges |
-| Document links | Resolved `Base`, local/extensionless paths, and already cached package imports |
+| Document links | The imports that the compiler loads: `Base`, local paths, and already cached package imports |
 | Incremental editing | Unsaved changes are used by source features and staged compiler checks |
 | Workspace folders | Multiple roots and workspace-folder changes |
 | Watched files | Rechecks affected documents when the client sends file-change notifications; dynamic watcher registration when supported |
@@ -139,14 +145,19 @@ For qualified names such as `Ast.TermVar`, placing the cursor on `Ast` opens
 the imported module; placing it on `TermVar` jumps to the constructor declaration.
 The same navigation works in type annotations, match patterns, and expressions.
 
-Declaration queries respect lexical shadowing: a local parameter never resolves
-to a same-named global declaration or imported module. Hover and type navigation
-use that parameter's own indexed annotation when available. Renaming a module
-alias changes its declaration and unshadowed qualified uses; conflicts are rejected.
+A local binder hides a declaration of the same name. A local never hides a
+qualified name: as in the compiler, `Dep.value` reads the import `Dep` also
+beside a parameter named `Dep`. Hover and type navigation on a local use its
+annotation. Renaming a module alias changes its declaration and each qualified
+use.
 
-Completion includes parameters and case-pattern bindings only in their indexed
-scope. Local bindings shadow same-named declarations, prelude names and import
-aliases; a shadowed alias does not offer the imported module's members.
+A rename or an auto-import is checked before the server returns it. The server
+loads each edited document again with the edit applied. It refuses the edit
+unless each name keeps its meaning and the renamed names name the renamed
+declaration.
+
+Completion offers the locals that the compiler has in scope at the cursor. The
+server finds them with a load of the text before the cursor.
 
 Import completion searches indexed file names and import paths, including fuzzy
 input such as `apd` for `./nested/append.bend`. File-name exact and prefix matches
@@ -187,8 +198,8 @@ The Missing import quick fix remains available and follows the same alias rules.
 Unopened `.bend` files discovered under workspace roots are also candidates;
 the server does not download packages.
 
-Known explicit ADT annotations narrow case-pattern constructor candidates.
-Unknown types keep the available candidates rather than pretending to infer a type.
+A case pattern offers each visible constructor. The type checker, not
+completion, matches a constructor to the scrutinee's type.
 
 Accepting an import completion inserts `import Base` without an alias, or a
 complete local/cached-package import such as `import tools.bend as Tools`.
@@ -252,8 +263,8 @@ Rename Symbol selects the name under the cursor: an explicit import alias, the
 qualifier in `Test.foo`, a supported resolved member such as `foo`, or a local
 binding. The rename preview highlights only that name. An import path such as
 `test.bend` is a file link, not an alias rename target; use the project tree's
-file/folder rename instead. Alias rename leaves import paths, shadowed locals,
-unrelated members, and comments unchanged.
+file/folder rename instead. Alias rename leaves import paths, locals, members,
+and comments unchanged.
 
 File-operation clients must request `workspace/willRenameFiles`, apply the
 returned versioned workspace edit, perform the filesystem move, and send
@@ -261,9 +272,11 @@ returned versioned workspace edit, perform the filesystem move, and send
 closed sources are refreshed during cold staging. Compiler-owned `Base` cannot
 be moved or overwritten.
 
-Global semantic/reverse-index research remains closed. Background file discovery
-uses the existing immutable snapshots, dense per-document syntax indexes, and
-import graph; it does not introduce a global semantic database. See the
+Global semantic/reverse-index research remains closed. Name features load each
+document as the compiler's entry and cache the result for one workspace
+generation; there is no global semantic database. Background file discovery uses
+the existing immutable snapshots, dense per-document syntax indexes, and import
+graph. See the
 [architecture decision and scope amendment](docs/adr-global-indexing.md).
 The [integration salvage audit](docs/integration-salvage-audit.md) classifies
 every substantive change in the closed index/discovery PRs against main.

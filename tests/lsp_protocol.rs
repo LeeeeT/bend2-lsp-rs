@@ -125,7 +125,7 @@ mod protocol {
     fn install_compiler_stub(dir: &Path) -> PathBuf {
         fs::create_dir_all(dir).must_be("create stub bin directory");
         let executable = dir.join("bend");
-        fs::write(&executable, compiler_fixture_script("#!/bin/sh\ndep=\"${1%/*}/dep.bend\"\nif grep -q 'dep\\.bend as Dep$' \"$1\" && grep -q '^BAD$' \"$dep\"; then\n  printf 'Error:\\nsynthetic imported error\\nLocation:\\n1>| BAD\\n' >&2\n  exit 1\nfi\nexit 0\n")).must_be("write compiler stub");
+        fs::write(&executable, compiler_fixture_script("#!/bin/sh\nif [ \"$1\" = base ]; then\n  printf 'type U32 is Data:\\n  U32{}\\ntype String is Data:\\n  Text{}\\ndef builtin() -> U32:\\n  1\\n'\n  exit 0\nfi\ndep=\"${1%/*}/dep.bend\"\nif grep -q 'dep\\.bend as Dep$' \"$1\" && grep -q '^BAD$' \"$dep\"; then\n  printf 'Error:\\nsynthetic imported error\\nLocation:\\n1>| BAD\\n' >&2\n  exit 1\nfi\nexit 0\n")).must_be("write compiler stub");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
             .must_be("make compiler stub executable");
         dir.to_path_buf()
@@ -355,7 +355,7 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
         let dependency_path = workspace.join("dep.bend");
-        let main_text = "import dep.bend as Dep\ndef main: Type\n  Dep.value\n";
+        let main_text = "import dep.bend as Dep\ndef main() -> Type:\n  Dep.value\n";
         fs::write(&main_path, main_text).must_be("write root source");
         fs::write(&dependency_path, "BAD\n").must_be("write broken dependency");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
@@ -384,7 +384,8 @@ mod protocol {
             Duration::from_secs(5)
         ));
 
-        fs::write(&dependency_path, "def value: Type\n  1\n").must_be("fix dependency on disk");
+        fs::write(&dependency_path, "def value() -> Type:\n  1\n")
+            .must_be("fix dependency on disk");
         client.notify(
             "workspace/didChangeWatchedFiles",
             json!({"changes":[{"uri":dependency_uri,"type":2}]}),
@@ -404,8 +405,8 @@ mod protocol {
         let first_path = workspace.join("first.bend");
         let second_path = workspace.join("second.bend");
         let dependency_path = workspace.join("dep.bend");
-        let importing_text = "import dep.bend as Dep\ndef main: Type\n  Dep.value\n";
-        let clean_text = "def main: Type\n  1\n";
+        let importing_text = "import dep.bend as Dep\ndef main() -> Type:\n  Dep.value\n";
+        let clean_text = "def main() -> Type:\n  1\n";
         fs::write(&first_path, importing_text).must_be("write first root");
         fs::write(&second_path, importing_text).must_be("write second root");
         fs::write(&dependency_path, "BAD\n").must_be("write broken dependency");
@@ -472,7 +473,7 @@ mod protocol {
             "one clean root must not clear another root's imported diagnostic"
         );
 
-        fs::write(&dependency_path, "def value: Type\n  1\n").must_be("fix shared dependency");
+        fs::write(&dependency_path, "def value() -> Type:\n  1\n").must_be("fix shared dependency");
         client.notify(
             "workspace/didChangeWatchedFiles",
             json!({"changes":[{"uri":dependency_uri,"type":2}]}),
@@ -539,7 +540,7 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
         let source =
-            "def add(x: U32, y: U32) -> U32:\n  (x + y : U32)\ndef main: U32\n  add(1, 2)\n";
+            "def add(x: U32, y: U32) -> U32:\n  (x + y : U32)\ndef main() -> U32:\n  add(1, 2)\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -624,7 +625,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "def add(x: U32, y: U32) -> U32:\n  (x + y : U32)\ndef main: U32\n  ad\n";
+        let source = "def add(x: U32, y: U32) -> U32:\n  (x + y : U32)\ndef main() -> U32:\n  ad\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -725,11 +726,11 @@ mod protocol {
         client.finish();
     }
     #[test]
-    fn completion_does_not_treat_a_shadowed_parameter_as_an_import_alias() {
+    fn completion_offers_alias_members_beside_a_same_named_parameter() {
         let temp = tempdir().must_be("temporary workspace");
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
-        fs::write(workspace.join("dep.bend"), "def shared():\n  0\n")
+        fs::write(workspace.join("dep.bend"), "def shared() -> U32:\n  0\n")
             .must_be("write imported module");
         let main_path = workspace.join("main.bend");
         let source = "import ./dep.bend as Dep\ndef shadowed(Dep: U32) -> U32:\n  Dep.sh\ndef unshadowed() -> U32:\n  Dep.sh\n";
@@ -741,39 +742,30 @@ mod protocol {
         let mut client = spawn_client(&compiler_dir);
         client.initialize(&workspace);
         open_clean_document(&mut client, &uri, source);
-        let shadowed = client.request(
-            "textDocument/completion",
-            json!({"textDocument":{"uri":uri},"position":{"line":2,"character":8}}),
-        );
-        assert!(
-            shadowed["result"]
-                .as_array()
-                .or_else(|| shadowed["result"]["items"].as_array())
-                .must_be("shadowed completion items")
-                .is_empty()
-        );
-        let unshadowed = client.request(
-            "textDocument/completion",
-            json!({"textDocument":{"uri":uri},"position":{"line":4,"character":8}}),
-        );
-        assert!(
-            unshadowed["result"]
-                .as_array()
-                .or_else(|| unshadowed["result"]["items"].as_array())
-                .must_be("module completion result")
-                .iter()
-                .any(|item| item["label"] == "shared" && item["kind"] == 3),
-            "the unshadowed import must still offer its members: {unshadowed}"
-        );
+        for line in [2, 4] {
+            let response = client.request(
+                "textDocument/completion",
+                json!({"textDocument":{"uri":uri},"position":{"line":line,"character":8}}),
+            );
+            assert!(
+                response["result"]
+                    .as_array()
+                    .or_else(|| response["result"]["items"].as_array())
+                    .must_be("module completion result")
+                    .iter()
+                    .any(|item| item["label"] == "shared" && item["kind"] == 3),
+                "a local never hides a qualified name: {response}"
+            );
+        }
         client.finish();
     }
     #[test]
-    fn case_pattern_completion_offers_constructors_not_expression_names() {
+    fn case_pattern_completion_offers_only_constructors() {
         let temp = tempdir().must_be("temporary workspace");
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "type Shape is Data:\n  Pair{value: U32}\ndef PairFactory():\n  0\ndef main(value: U32):\n  match value:\n    case Pa\n      Pa\n";
+        let source = "type Shape is Data:\n  Pair{value: U32}\ndef PairFactory() -> U32:\n  0\ndef main(value: U32) -> U32:\n  match value:\n    case Pa\n      Pa\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -807,7 +799,12 @@ mod protocol {
             .or_else(|| body["result"]["items"].as_array())
             .must_be("completion result");
         assert!(items.iter().any(|item| item["label"] == "PairFactory"));
-        assert!(!items.iter().any(|item| item["kind"] == 4));
+        assert!(
+            items
+                .iter()
+                .any(|item| item["label"] == "Pair" && item["kind"] == 4),
+            "a constructor builds a value in an expression"
+        );
         client.finish();
     }
     #[test]
@@ -819,11 +816,11 @@ mod protocol {
             .must_be("exclude discovery-only constructors");
         fs::write(
             workspace.join("dep.bend"),
-            "type Remote is Data:\n  Pair{value: U32}\ndef PairFactory():\n  0\n",
+            "type Remote is Data:\n  Pair{value: U32}\ndef PairFactory() -> U32:\n  0\n",
         )
         .must_be("write imported constructors");
         let main_path = workspace.join("main.bend");
-        let source = "import ./dep.bend as Dep\ndef shadowed(Dep: U32):\n  match Dep:\n    case Dep.Pa\ndef main(value: U32):\n  match value:\n    case Dep.Pa\n";
+        let source = "import ./dep.bend as Dep\ndef shadowed(Dep: U32) -> U32:\n  match Dep:\n    case Dep.Pa\ndef main(value: U32) -> U32:\n  match value:\n    case Dep.Pa\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -832,7 +829,7 @@ mod protocol {
         let mut client = spawn_client(&compiler_dir);
         client.initialize(&workspace);
         open_clean_document(&mut client, &uri, source);
-        for (line, expected) in [(3, Vec::new()), (6, vec![json!("Pair")])] {
+        for line in [3, 6] {
             let response = client.request(
                 "textDocument/completion",
                 json!({"textDocument":{"uri":uri},"position":{"line":line,"character":15}}),
@@ -846,11 +843,12 @@ mod protocol {
                     .iter()
                     .map(|item| item["label"].clone())
                     .collect::<Vec<_>>(),
-                expected
+                vec![json!("Pair")],
+                "a local never hides a qualified name"
             );
             assert!(items.iter().all(|item| item["kind"] == 4));
         }
-        let revised = "type Local is Data:\n  Fresh\n  Other\ndef main(value: U32):\n  match value:\n    case ";
+        let revised = "type Local is Data:\n  Fresh{}\n  Other{}\ndef main(value: U32) -> U32:\n  match value:\n    case ";
         client.notify(
             "textDocument/didChange",
             json!({"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":revised}]}),
@@ -875,7 +873,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "def inspect(outer: U32):\n  match outer:\n    case Pair(inner):\n      in\n    case Empty:\n      in\n";
+        let source = "type Box is Data:\n  Pair{inner: U32}\n  Empty{}\ndef inspect(outer: Box) -> U32:\n  match outer:\n    case Pair{inner}:\n      in\n    case Empty{}:\n      in\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -884,7 +882,7 @@ mod protocol {
         let mut client = spawn_client(&compiler_dir);
         client.initialize(&workspace);
         open_clean_document(&mut client, &uri, source);
-        for (line, visible) in [(3, true), (5, false)] {
+        for (line, visible) in [(6, true), (8, false)] {
             let response = client.request(
                 "textDocument/completion",
                 json!({"textDocument":{"uri":uri},"position":{"line":line,"character":8}}),
@@ -897,14 +895,14 @@ mod protocol {
                 .any(|item| item["label"] == "inner" && item["kind"] == 6);
             assert_eq!(has_inner, visible, "case bindings must stay in their arm");
         }
-        let revised = "def inspect(updated_outer: U32):\n  match updated_outer:\n    case Pair(latest):\n      ";
+        let revised = "type Box is Data:\n  Pair{inner: U32}\n  Empty{}\ndef inspect(updated_outer: Box) -> U32:\n  match updated_outer:\n    case Pair{latest}:\n      ";
         client.notify(
             "textDocument/didChange",
             json!({"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":revised}]}),
         );
         let response = client.request(
             "textDocument/completion",
-            json!({"textDocument":{"uri":uri},"position":{"line":3,"character":6}}),
+            json!({"textDocument":{"uri":uri},"position":{"line":6,"character":6}}),
         );
         let locals: Vec<_> = response["result"]
             .as_array()
@@ -927,7 +925,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let initial = "def revision_one: U32\n  1\n";
+        let initial = "def revision_one() -> U32:\n  1\n";
         fs::write(&main_path, initial).must_be("write initial source");
         let uri = Url::from_file_path(&main_path)
             .must_be("valid test fixture value")
@@ -938,7 +936,7 @@ mod protocol {
         open_clean_document(&mut client, &uri, initial);
 
         let large = include_str!("../benches/fixtures/analyzer_large.bend");
-        let revised = format!("def revision_two: U32\n  2\n{large}");
+        let revised = format!("def revision_two() -> U32:\n  2\n{large}");
         client.notify(
             "textDocument/didChange",
             json!({"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":revised}]}),
@@ -951,7 +949,7 @@ mod protocol {
             .as_str()
             .must_be("hover result for revision two");
         assert!(
-            value.contains("def revision_two: U32") && !value.contains("revision_one"),
+            value.contains("def revision_two() -> U32") && !value.contains("revision_one"),
             "hover after didChange(v2) must not read v1: {hover}"
         );
         client.finish();
@@ -962,7 +960,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let initial = "def revision_one: U32\n  1\n";
+        let initial = "def revision_one() -> U32:\n  1\n";
         fs::write(&main_path, initial).must_be("write initial source");
         let uri = Url::from_file_path(&main_path)
             .must_be("valid test fixture value")
@@ -972,7 +970,7 @@ mod protocol {
         client.initialize(&workspace);
         open_clean_document(&mut client, &uri, initial);
 
-        let revised = "def revision_two: U32\n  2\ndef caller: U32\n  revi\n";
+        let revised = "def revision_two() -> U32:\n  2\ndef caller() -> U32:\n  revi\n";
         client.notify(
             "textDocument/didChange",
             json!({"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":revised}]}),
@@ -1013,7 +1011,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let initial = "def revision_one: U32\n  1\n";
+        let initial = "def revision_one() -> U32:\n  1\n";
         fs::write(&main_path, initial).must_be("write initial source");
         let uri = Url::from_file_path(&main_path)
             .must_be("valid test fixture value")
@@ -1024,8 +1022,8 @@ mod protocol {
         open_clean_document(&mut client, &uri, initial);
 
         let large = include_str!("../benches/fixtures/analyzer_large.bend");
-        let revision_two = format!("def revision_two: U32\n  2\n{large}");
-        let revision_three = format!("def revision_three: U32\n  3\n{large}");
+        let revision_two = format!("def revision_two() -> U32:\n  2\n{large}");
+        let revision_three = format!("def revision_three() -> U32:\n  3\n{large}");
         client.notify(
             "textDocument/didChange",
             json!({"textDocument":{"uri":uri,"version":2},"contentChanges":[{"text":revision_two}]}),
@@ -1042,7 +1040,7 @@ mod protocol {
             .as_str()
             .must_be("hover result for revision three");
         assert!(
-            value.contains("def revision_three: U32") && !value.contains("revision_two"),
+            value.contains("def revision_three() -> U32") && !value.contains("revision_two"),
             "superseded v2 must never replace v3: {hover}"
         );
         client.finish();
@@ -1058,7 +1056,7 @@ mod protocol {
         let module = "def clamp(x: U32) -> U32:\n  x\n";
         let mut importer = String::from("import dep.bend as Dep\n");
         for index in 0..PENDING_IMPORT_CALLS {
-            write!(importer, "def use_{index}: U32\n  Dep.clamp(1)\n")
+            write!(importer, "def use_{index}() -> U32:\n  Dep.clamp(1)\n")
                 .must_be("append importing call");
         }
         fs::write(&importer_path, &importer).must_be("write importing source");
@@ -1136,7 +1134,7 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let caller_path = workspace.join("main.bend");
         let target_path = workspace.join("dep.bend");
-        let caller = "import dep.bend as Dep\ndef main: U32\n  Dep.clamp(1)\n";
+        let caller = "import dep.bend as Dep\ndef main() -> U32:\n  Dep.clamp(1)\n";
         fs::write(&caller_path, caller).must_be("write caller");
         fs::write(&target_path, "def old(x: U32) -> U32:\n  x\n").must_be("write old target");
         let caller_uri = Url::from_file_path(&caller_path)
@@ -1163,7 +1161,7 @@ mod protocol {
         );
         let mut target = String::new();
         for index in 0..PENDING_IMPORT_CALLS {
-            write!(target, "def slow_{index}: U32\n  1\n").must_be("append pending target");
+            write!(target, "def slow_{index}() -> U32:\n  1\n").must_be("append pending target");
         }
         target.push_str("def clamp(x: U32) -> U32:\n  x\n");
         client.notify(
@@ -1263,7 +1261,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "def add(x: U32) -> U32:\n  x\ndef main: U32\n  add(1)\n";
+        let source = "def add(x: U32) -> U32:\n  x\ndef main() -> U32:\n  add(1)\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -1412,18 +1410,18 @@ mod protocol {
         for (event, source, expected) in [
             (
                 1,
-                Some("def project_created = 1\n"),
+                Some("def project_created() -> U32: 1\n"),
                 Some("project_created"),
             ),
             (
                 2,
-                Some("def project_changed = 2\n"),
+                Some("def project_changed() -> U32: 2\n"),
                 Some("project_changed"),
             ),
             (3, None, None),
             (
                 1,
-                Some("def project_recreated = 3\n"),
+                Some("def project_recreated() -> U32: 3\n"),
                 Some("project_recreated"),
             ),
         ] {
@@ -1456,7 +1454,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let path = workspace.join("overlay.bend");
-        fs::write(&path, "def project_disk = 1\n").must_be("write disk source");
+        fs::write(&path, "def project_disk() -> U32: 1\n").must_be("write disk source");
         let uri = Url::from_file_path(&path).must_be("source URI").to_string();
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let mut client = spawn_client(&compiler_dir);
@@ -1466,7 +1464,7 @@ mod protocol {
         client.notify(
             "textDocument/didOpen",
             json!({"textDocument":{
-                "uri":uri,"languageId":"bend","version":1,"text":"def project_unsaved = 2\n"
+                "uri":uri,"languageId":"bend","version":1,"text":"def project_unsaved() -> U32: 2\n"
             }}),
         );
         let open = client.request("workspace/symbol", json!({"query":"project_"}));
@@ -1478,7 +1476,7 @@ mod protocol {
         );
         let deleted = client.request("workspace/symbol", json!({"query":"project_"}));
         assert_eq!(deleted["result"][0]["name"], "project_unsaved");
-        fs::write(&path, "def project_recreated = 3\n").must_be("recreate backing file");
+        fs::write(&path, "def project_recreated() -> U32: 3\n").must_be("recreate backing file");
         client.notify(
             "workspace/didChangeWatchedFiles",
             json!({"changes":[{"uri":uri,"type":1}]}),
@@ -1502,7 +1500,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let path = workspace.join("library.bend");
-        fs::write(&path, "def project_member = 1\n").must_be("write project source");
+        fs::write(&path, "def project_member() -> U32: 1\n").must_be("write project source");
         let root_uri = Url::from_directory_path(&workspace)
             .must_be("root URI")
             .to_string();
@@ -1566,8 +1564,11 @@ mod protocol {
             json!([]),
             "old scan must not resurrect removed roots: {removed}"
         );
-        fs::write(workspace.join("source_0.bend"), "def project_new = 1\n")
-            .must_be("replace removed source");
+        fs::write(
+            workspace.join("source_0.bend"),
+            "def project_new() -> U32: 1\n",
+        )
+        .must_be("replace removed source");
         client.notify(
             "workspace/didChangeWorkspaceFolders",
             json!({"event":{
@@ -1598,7 +1599,7 @@ mod protocol {
                 ),
                 (
                     "entry.bend".to_owned(),
-                    "import ./common.bend as Common\ndef main: U32\n  Common.identity(1)\n"
+                    "import ./common.bend as Common\ndef main() -> U32:\n  Common.identity(1)\n"
                         .to_owned(),
                 ),
             ]);
@@ -1681,12 +1682,12 @@ mod protocol {
         let common_path = workspace.join("common.bend");
         let entry_path = workspace.join("entry.bend");
         let unopened_path = workspace.join("unopened.bend");
-        fs::write(&common_path, "def project_value = 1\n").must_be("write declaration");
-        let entry = "import ./common.bend as Common\ndef entry = Common.project_value\n";
+        fs::write(&common_path, "def project_value() -> U32: 1\n").must_be("write declaration");
+        let entry = "import ./common.bend as Common\ndef entry() -> U32: Common.project_value\n";
         fs::write(&entry_path, entry).must_be("write entry");
         fs::write(
             &unopened_path,
-            "import ./common.bend as Common\ndef unopened = Common.project_value\n",
+            "import ./common.bend as Common\ndef unopened() -> U32: Common.project_value\n",
         )
         .must_be("write unopened importer");
         let common_uri = regression_file_uri(&common_path);
@@ -1696,7 +1697,7 @@ mod protocol {
         let mut client = spawn_client(&compiler_dir);
         client.initialize(&workspace);
         open_clean_document(&mut client, &entry_uri, entry);
-        let params = json!({"textDocument":{"uri":entry_uri},"position":{"line":1,"character":20},
+        let params = json!({"textDocument":{"uri":entry_uri},"position":{"line":1,"character":28},
             "context":{"includeDeclaration":true}});
         let references = client.request("textDocument/references", params.clone());
         let locations = references["result"]
@@ -1704,8 +1705,8 @@ mod protocol {
             .must_be("reference locations");
         let expected = [
             (common_uri.as_str(), 0, 4, 17),
-            (entry_uri.as_str(), 1, 19, 32),
-            (unopened_uri.as_str(), 1, 22, 35),
+            (entry_uri.as_str(), 1, 27, 40),
+            (unopened_uri.as_str(), 1, 30, 43),
         ];
         for (uri, line, start, end) in expected {
             let range = json!({"start":{"line":line,"character":start},"end":{"line":line,"character":end}});
@@ -1716,7 +1717,7 @@ mod protocol {
         }
         assert_eq!(locations.len(), 3, "each declaration/use appears once");
         let rename = client.request("textDocument/rename", json!({
-            "textDocument":{"uri":entry_uri},"position":{"line":1,"character":20},"newName":"project_replaced"
+            "textDocument":{"uri":entry_uri},"position":{"line":1,"character":28},"newName":"project_replaced"
         }));
         for (uri, line, start, end) in expected {
             assert_eq!(
@@ -1761,12 +1762,11 @@ mod protocol {
             let path = workspace.join(relative);
             fs::create_dir_all(path.parent().must_be("source parent"))
                 .must_be("create source directory");
-            fs::write(path, format!("def {name} = 1\n")).must_be("write source");
+            fs::write(path, format!("def {name}() -> U32: 1\n")).must_be("write source");
         }
         let entry_path = workspace.join("entry.bend");
-        let entry =
-            "import ./ignored/library.bend as Ignored\ndef entry = Ignored.project_ignored\n";
-        fs::write(&entry_path, "def entry = 1\n").must_be("write unopened entry");
+        let entry = "import ./ignored/library.bend as Ignored\ndef entry() -> U32: Ignored.project_ignored\n";
+        fs::write(&entry_path, "def entry() -> U32: 1\n").must_be("write unopened entry");
         let entry_uri = regression_file_uri(&entry_path);
         let ignored_uri = regression_file_uri(&workspace.join("ignored/library.bend"));
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
@@ -1784,7 +1784,7 @@ mod protocol {
         let definition = client.request(
             "textDocument/definition",
             json!({
-                "textDocument":{"uri":entry_uri},"position":{"line":1,"character":21}
+                "textDocument":{"uri":entry_uri},"position":{"line":1,"character":30}
             }),
         );
         assert_eq!(definition["result"]["uri"], ignored_uri, "{definition}");
@@ -1809,7 +1809,8 @@ mod protocol {
             ("visible.bend", "project_visible", true),
         ] {
             let path = workspace.join(relative);
-            fs::write(&path, format!("def {declaration} = 1\n")).must_be("write created source");
+            fs::write(&path, format!("def {declaration}() -> U32: 1\n"))
+                .must_be("write created source");
             let uri = regression_file_uri(&path);
             client.notify(
                 "workspace/didChangeWatchedFiles",
@@ -1835,11 +1836,11 @@ mod protocol {
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let mut client = spawn_client(&compiler_dir);
         client.initialize(&workspace);
-        open_clean_document(&mut client, &uri, "def project_transient = 1\n");
+        open_clean_document(&mut client, &uri, "def project_transient() -> U32: 1\n");
         client.notify("textDocument/didClose", json!({"textDocument":{"uri":uri}}));
         let closed = client.request("workspace/symbol", json!({"query":"project_"}));
         assert_eq!(closed["result"], json!([]), "{closed}");
-        fs::write(&path, "def project_created = 2\n").must_be("create backing file");
+        fs::write(&path, "def project_created() -> U32: 2\n").must_be("create backing file");
         client.notify(
             "workspace/didChangeWatchedFiles",
             json!({"changes":[{"uri":uri,"type":1}]}),
@@ -1859,8 +1860,8 @@ mod protocol {
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let mut client = spawn_client(&compiler_dir);
         client.initialize(&workspace);
-        open_clean_document(&mut client, &uri, "def project_unsaved = 1\n");
-        fs::write(&path, "def project_saved = 2\n").must_be("save new buffer to disk");
+        open_clean_document(&mut client, &uri, "def project_unsaved() -> U32: 1\n");
+        fs::write(&path, "def project_saved() -> U32: 2\n").must_be("save new buffer to disk");
         client.notify(
             "workspace/didChangeWatchedFiles",
             json!({"changes":[{"uri":uri,"type":1}]}),
@@ -1879,7 +1880,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let path = workspace.join("library.bend");
-        let mut source = "def project_after_cancel = 1\n".to_owned();
+        let mut source = "def project_after_cancel() -> U32: 1\n".to_owned();
         source.push_str(&"# source indexing work\n".repeat(200_000));
         fs::write(&path, source).must_be("write source awaiting discovery");
         let uri = regression_file_uri(&path);
@@ -1910,7 +1911,7 @@ mod protocol {
         let temp = tempdir().must_be("temporary workspace");
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
-        let mut source = "def project_shutdown = 1\n".to_owned();
+        let mut source = "def project_shutdown() -> U32: 1\n".to_owned();
         source.push_str(&"# source indexing work\n".repeat(40_000));
         for index in 0..32 {
             fs::write(workspace.join(format!("source_{index}.bend")), &source)
@@ -1929,10 +1930,11 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         fs::create_dir_all(&external).must_be("create external dependency directory");
         let dependency = external.join("library.bend");
-        fs::write(&dependency, "def project_imported = 1\n").must_be("write external declaration");
+        fs::write(&dependency, "def project_imported() -> U32: 1\n")
+            .must_be("write external declaration");
         fs::write(
             workspace.join("entry.bend"),
-            "import ../external/library.bend as External\ndef entry = External.project_imported\n",
+            "import ../external/library.bend as External\ndef entry() -> U32: External.project_imported\n",
         )
         .must_be("write unopened importer");
         let uri = regression_file_uri(&dependency);
@@ -1958,7 +1960,7 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let old = workspace.join("old.bend");
         let new = workspace.join("new.bend");
-        fs::write(&old, "def project_relocated = 1\n").must_be("write unopened source");
+        fs::write(&old, "def project_relocated() -> U32: 1\n").must_be("write unopened source");
         let old_uri = regression_file_uri(&old);
         let new_uri = regression_file_uri(&new);
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
@@ -1966,7 +1968,11 @@ mod protocol {
         client.initialize(&workspace);
         let initial = client.request("workspace/symbol", json!({"query":"project_relocated"}));
         assert_eq!(initial["result"][0]["location"]["uri"], old_uri);
-        open_clean_document(&mut client, &new_uri, "def destination_overlay = 2\n");
+        open_clean_document(
+            &mut client,
+            &new_uri,
+            "def destination_overlay() -> U32: 2\n",
+        );
         fs::rename(&old, &new).must_be("client moves source");
         client.notify(
             "workspace/didRenameFiles",
@@ -1990,7 +1996,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "def main: U32\n  1\n";
+        let source = "def main() -> U32:\n  1\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -2080,7 +2086,7 @@ mod protocol {
         let temp = tempdir().must_be("temporary workspace");
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
-        let source = "def value: U32\n  1\ndef main: U32\n  val\n";
+        let source = "def value() -> U32:\n  1\ndef main() -> U32:\n  val\n";
         let uri = "untitled:scratch.bend";
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let mut client = spawn_client(&compiler_dir);
@@ -2127,7 +2133,7 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
         let source =
-            "def add(x: U32, y: U32) -> U32:\n  (x + y : U32)\ndef main: U32\n  add(1, 2)\n";
+            "def add(x: U32, y: U32) -> U32:\n  (x + y : U32)\ndef main() -> U32:\n  add(1, 2)\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -2169,7 +2175,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "def echo(value: U32) -> String:\n  \"🦀\" # comment\n  42\n";
+        let source = "import Base\ndef echo(value: U32) -> String:\n  \"🦀\" # comment\ndef answer() -> U32: 42\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -2215,12 +2221,13 @@ mod protocol {
             })
             .collect();
         for expected in [
-            (0, 4, 4, 12),
-            (0, 9, 5, 8),
-            (0, 16, 3, 1),
-            (1, 2, 4, 18),
-            (1, 7, 9, 17),
-            (2, 2, 2, 19),
+            (1, 4, 4, 12),
+            (1, 9, 5, 8),
+            (1, 16, 3, 1),
+            (1, 24, 6, 1),
+            (2, 2, 4, 18),
+            (2, 7, 9, 17),
+            (3, 21, 2, 19),
         ] {
             assert!(
                 tokens.contains(&expected),
@@ -2264,7 +2271,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "def main: U32\n  (1 # trailing comment\n";
+        let source = "def main() -> U32:\n  (1 # trailing comment\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -2342,9 +2349,9 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
         let dependency_path = workspace.join("dep.bend");
-        let source = "import ./dep.bend as Dep\ndef main: U32\n  Dep.value\n";
+        let source = "import ./dep.bend as Dep\ndef main() -> U32:\n  Dep.value\n";
         fs::write(&main_path, source).must_be("write source");
-        fs::write(&dependency_path, "def value: U32\n  1\n").must_be("write dependency");
+        fs::write(&dependency_path, "def value() -> U32:\n  1\n").must_be("write dependency");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
             .must_be("valid test fixture value")
@@ -2402,7 +2409,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "def first : U32:\n    1\ndef second: U32\n    2\n";
+        let source = "def first : U32:\n    1\ndef second() -> U32:\n    2\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -2463,7 +2470,7 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
         let source =
-            "def add(x: U32, y: U32) -> U32:\n  (x + y : U32)\ndef main: U32\n  add(1, 2)\n";
+            "def add(x: U32, y: U32) -> U32:\n  (x + y : U32)\ndef main() -> U32:\n  add(1, 2)\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -2551,9 +2558,9 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
         let dependency_path = workspace.join("dep.bend");
-        let source = "import Base # builtin prelude\nimport ./dep.bend as Dep\ndef main: Type\n  Dep.value\n";
+        let source = "import Base # builtin prelude\nimport ./dep.bend as Dep\ndef main() -> Type:\n  Dep.value\n";
         fs::write(&main_path, source).must_be("write source");
-        fs::write(&dependency_path, "def value: Type\n  1\n").must_be("write dependency");
+        fs::write(&dependency_path, "def value() -> Type:\n  1\n").must_be("write dependency");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let main_uri = Url::from_file_path(&main_path)
             .must_be("valid test fixture value")
@@ -3094,11 +3101,11 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "def main: Type\n  1\n";
+        let source = "def main() -> Type:\n  1\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let custom_compiler = temp.path().join("configured-bend");
-        fs::write(&custom_compiler, compiler_fixture_script("#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in version|--help) exit 0;; esac\ndone\nprintf 'run\\n' >> \"$0.runs\"\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--report-error\" ]; then\n    printf 'Error:\\nconfigured compiler error\\nLocation:\\n1>| def main: Type\\n' >&2\n    exit 1\n  fi\ndone\nexit 0\n")).must_be("write custom compiler");
+        fs::write(&custom_compiler, compiler_fixture_script("#!/bin/sh\nfor arg in \"$@\"; do\n  case \"$arg\" in version|--help) exit 0;; esac\ndone\nprintf 'run\\n' >> \"$0.runs\"\nfor arg in \"$@\"; do\n  if [ \"$arg\" = \"--report-error\" ]; then\n    printf 'Error:\\nconfigured compiler error\\nLocation:\\n1>| def main() -> U32: Type\\n' >&2\n    exit 1\n  fi\ndone\nexit 0\n")).must_be("write custom compiler");
         fs::set_permissions(&custom_compiler, fs::Permissions::from_mode(0o755))
             .must_be("make custom compiler executable");
         let uri = Url::from_file_path(&main_path)
@@ -3188,7 +3195,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "def main: Type\n  1\n";
+        let source = "def main() -> Type:\n  1\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let missing_compiler = workspace.join("missing-bend");
@@ -3240,14 +3247,14 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let dependency_path = workspace.join("dep.bend");
-        fs::write(&dependency_path, "def value: Type\n  1\n").must_be("write dependency");
+        fs::write(&dependency_path, "def value() -> Type:\n  1\n").must_be("write dependency");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = "untitled:scratch.bend";
         let dependency_uri = Url::from_file_path(&dependency_path)
             .must_be("valid test fixture value")
             .to_string();
         let source =
-            "import Base # prelude\nimport ./dep.bend as Dep\ndef main: Type\n  Dep.value\n";
+            "import Base # prelude\nimport ./dep.bend as Dep\ndef main() -> Type:\n  Dep.value\n";
         let mut client = spawn_client(&compiler_dir);
         client.initialize(&workspace);
         client.notify(
@@ -3294,7 +3301,7 @@ mod protocol {
         fs::create_dir_all(&first_root).must_be("create first workspace root");
         fs::create_dir_all(&second_root).must_be("create second workspace root");
         let dependency_path = second_root.join("dep.bend");
-        fs::write(&dependency_path, "def value: Type\n  1\n").must_be("write dependency");
+        fs::write(&dependency_path, "def value() -> Type:\n  1\n").must_be("write dependency");
         let first_uri = Url::from_directory_path(&first_root).must_be("valid test fixture value");
         let second_uri = Url::from_directory_path(&second_root).must_be("valid test fixture value");
         let dependency_uri = Url::from_file_path(&dependency_path)
@@ -4017,7 +4024,7 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
         let dependency_path = workspace.join("dep.bend");
-        let main_source = "import ./dep.bend as Dep\ndef main() -> U32:\n  Dep.value()\n# Dep.value comment\ndef note() -> String:\n  \"Dep.value\"\ndef shadow(Dep):\n  Dep.value()\n";
+        let main_source = "import ./dep.bend as Dep\ndef main() -> U32:\n  Dep.value()\n# Dep.value comment\ndef note() -> String:\n  \"Dep.value\"\ndef shadow(Dep) -> U32:\n  Dep.value()\n";
         let dependency_source = "def value() -> U32:\n  1\ndef local() -> U32:\n  value()\n";
         fs::write(&main_path, main_source).must_be("write root source");
         fs::write(&dependency_path, dependency_source).must_be("write dependency");
@@ -4095,8 +4102,8 @@ mod protocol {
             rename["result"]["changes"][&main_uri]
                 .as_array()
                 .map(Vec::len),
-            Some(1),
-            "rename should update only qualified code, not comments or strings: {rename}"
+            Some(2),
+            "rename updates each qualified use, beside a same-named local too, and no comment or string: {rename}"
         );
         client.finish();
     }
@@ -4106,7 +4113,7 @@ mod protocol {
         let workspace = temp.path().join("workspace");
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
-        let source = "def target() -> U32:\n  0\ndef wrapper(target):\n  target()\ndef main: U32\n  target()\n";
+        let source = "def target() -> U32:\n  0\ndef wrapper(target) -> U32:\n  target()\ndef main() -> U32:\n  target()\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -4529,8 +4536,9 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let main_path = workspace.join("main.bend");
         let dependency_path = workspace.join("dep.bend");
-        let source_v1 = "import ./dep.bend as Dep\ndef main: Type\n  Dep.value\n";
-        let source_v2 = "# BLOCKED_V1\nimport ./dep.bend as Dep\ndef main: Type\n  Dep.value\n";
+        let source_v1 = "import ./dep.bend as Dep\ndef main() -> Type:\n  Dep.value\n";
+        let source_v2 =
+            "# BLOCKED_V1\nimport ./dep.bend as Dep\ndef main() -> Type:\n  Dep.value\n";
         let source_v3 = "def main() -> U32:\n  2\n";
         fs::write(&main_path, source_v1).must_be("write initial root source");
         fs::write(&dependency_path, "BAD\n").must_be("write broken dependency");
@@ -5020,7 +5028,7 @@ mod protocol {
         let dependency_path = workspace.join("dep.bend");
         let dependency_source = "def external(x: U32) -> U32:\n  x\n";
         fs::write(&dependency_path, dependency_source).must_be("write dependency");
-        let source = "import ./dep.bend as Dep\ntype Shape is Data:\n  Circle{}\n  Square{}\ndef leaf(x: U32) -> U32:\n  x\ndef root(x: U32) -> U32:\n  leaf(x) + Dep.external(x)\ndef shape(x: Shape) -> U32:\n  x\n";
+        let source = "import ./dep.bend as Dep\ntype Shape is Data:\n  Circle{}\n  Square{}\ndef leaf(x: U32) -> U32:\n  x\ndef root(x: U32) -> U32:\n  (leaf(x) + Dep.external(x) : U32)\ndef shape(x: Shape) -> U32:\n  x\n";
         fs::write(&main_path, source).must_be("write source");
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
         let uri = Url::from_file_path(&main_path)
@@ -5103,10 +5111,10 @@ mod protocol {
         let second_uri = Url::from_file_path(&second_path)
             .must_be("second root URI")
             .to_string();
-        fs::write(&dependency_path, "def value: U32\n  1\n").must_be("write dependency");
-        fs::write(&unrelated_path, "def isolated: U32\n  1\n").must_be("write unrelated file");
-        let source = "import ./dep.bend as Dep\ndef main: U32\n  Dep.value\n";
-        let second_source = "import ./dep.bend as Dep\ndef second: U32\n  Dep.value\n";
+        fs::write(&dependency_path, "def value() -> U32:\n  1\n").must_be("write dependency");
+        fs::write(&unrelated_path, "def isolated() -> U32:\n  1\n").must_be("write unrelated file");
+        let source = "import ./dep.bend as Dep\ndef main() -> U32:\n  Dep.value\n";
+        let second_source = "import ./dep.bend as Dep\ndef second() -> U32:\n  Dep.value\n";
         fs::write(&main_path, source).must_be("write first root");
         fs::write(&second_path, second_source).must_be("write second root");
 
@@ -5126,7 +5134,8 @@ mod protocol {
             "identical text at a newer revision must reuse the result",
         );
 
-        fs::write(&unrelated_path, "def isolated: U32\n  2\n").must_be("change unrelated file");
+        fs::write(&unrelated_path, "def isolated() -> U32:\n  2\n")
+            .must_be("change unrelated file");
         notify_watched_file_change(&mut client, &unrelated_uri);
         change_clean_document(&mut client, &uri, 3, source);
         change_clean_document(&mut client, &second_uri, 2, second_source);
@@ -5136,7 +5145,7 @@ mod protocol {
             "an unrelated file update must not invalidate either root",
         );
 
-        fs::write(&dependency_path, "def value: U32\n  2\n").must_be("change dependency");
+        fs::write(&dependency_path, "def value() -> U32:\n  2\n").must_be("change dependency");
         notify_watched_file_change(&mut client, &dependency_uri);
         wait_for_clean_diagnostics(&mut client, &uri);
         wait_for_clean_diagnostics(&mut client, &second_uri);
@@ -5190,12 +5199,12 @@ mod protocol {
                 writeln!(source, "import ./f{private:03}.bend as Private")
                     .must_be("generate private import");
                 source.push_str(if index == 0 {
-                    "def main: U32\n  1\n"
+                    "def main() -> U32:\n  1\n"
                 } else {
-                    "def second: U32\n  Common.value\n"
+                    "def second() -> U32:\n  Common.value\n"
                 });
             } else if index == 99 {
-                source.push_str("def value: U32\n  1\n");
+                source.push_str("def value() -> U32:\n  1\n");
             } else if index >= 100 {
                 writeln!(source, "def private_{index:03}: U32\n  1")
                     .must_be("generate private module");
@@ -5208,7 +5217,7 @@ mod protocol {
         }
 
         let unrelated = workspace.join("unrelated.bend");
-        fs::write(&unrelated, "def isolated: U32\n  1\n").must_be("write unrelated file");
+        fs::write(&unrelated, "def isolated() -> U32:\n  1\n").must_be("write unrelated file");
         BendCacheFiles {
             root: workspace.join("f000.bend"),
             second: workspace.join("f001.bend"),
@@ -5486,7 +5495,7 @@ mod protocol {
         fn measure_workspace_edits(&mut self) {
             let before = compiler_run_count(&self.calls);
             let started = Instant::now();
-            fs::write(&self.unrelated_path, "def isolated: U32\n  2\n")
+            fs::write(&self.unrelated_path, "def isolated() -> U32:\n  2\n")
                 .must_be("change unrelated file");
             notify_watched_file_change(&mut self.client, &self.unrelated_uri);
             self.client.notify(
@@ -5511,7 +5520,7 @@ mod protocol {
 
             let before = compiler_run_count(&self.calls);
             let started = Instant::now();
-            fs::write(&self.dependency_path, "def value: U32\n  2\n")
+            fs::write(&self.dependency_path, "def value() -> U32:\n  2\n")
                 .must_be("change shared dependency");
             notify_watched_file_change(&mut self.client, &self.dependency_uri);
             wait_for_bend_diagnostics(&mut self.client, &self.root_uri, 3);
@@ -5586,8 +5595,8 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let changing_path = workspace.join("changing.bend");
         let observed_path = workspace.join("observed.bend");
-        let changing_initial = "def initial_change: U32\n  1\n";
-        let observed_initial = "def revision_one: U32\n  1\n";
+        let changing_initial = "def initial_change() -> U32:\n  1\n";
+        let observed_initial = "def revision_one() -> U32:\n  1\n";
         fs::write(&changing_path, changing_initial).must_be("write changing source");
         fs::write(&observed_path, observed_initial).must_be("write observed source");
         let changing_uri = Url::from_file_path(&changing_path)
@@ -5602,7 +5611,7 @@ mod protocol {
         open_clean_document(&mut client, &changing_uri, changing_initial);
         open_clean_document(&mut client, &observed_uri, observed_initial);
 
-        let latest = "def latest_committed: U32\n  2\n";
+        let latest = "def latest_committed() -> U32:\n  2\n";
         client.notify(
             "textDocument/didChange",
             json!({"textDocument":{"uri":observed_uri,"version":2},"contentChanges":[{"text":latest}]}),
@@ -5619,7 +5628,7 @@ mod protocol {
         );
 
         let large = include_str!("../benches/fixtures/analyzer_large.bend");
-        let revised = format!("def large_edit: U32\n  1\n{large}\n{large}\n{large}\n{large}");
+        let revised = format!("def large_edit() -> U32:\n  1\n{large}\n{large}\n{large}\n{large}");
         client.notify(
             "textDocument/didChange",
             json!({
@@ -5682,7 +5691,7 @@ mod protocol {
         fs::create_dir_all(&workspace).must_be("create workspace");
         let opening_path = workspace.join("opening.bend");
         let observed_path = workspace.join("observed.bend");
-        let observed_source = "def stable_document: U32\n  1\n";
+        let observed_source = "def stable_document() -> U32:\n  1\n";
         fs::write(&observed_path, observed_source).must_be("write observed source");
         let opening_uri = Url::from_file_path(&opening_path)
             .must_be("opening document URI")
@@ -5762,8 +5771,8 @@ mod protocol {
         let main_path = workspace.join("main.bend");
         let first_dependency = workspace.join("first.bend");
         let second_dependency = workspace.join("second.bend");
-        let source = "import ./first.bend as First\nimport ./second.bend as Second\ndef main: U32\n  First.value\n";
-        let repeated_excerpt = "def value: U32\n  1\n";
+        let source = "import ./first.bend as First\nimport ./second.bend as Second\ndef main() -> U32:\n  First.value\n";
+        let repeated_excerpt = "def value() -> U32:\n  1\n";
         fs::write(&main_path, source).must_be("write root source");
         fs::write(&first_dependency, repeated_excerpt).must_be("write first dependency");
         fs::write(&second_dependency, repeated_excerpt).must_be("write second dependency");
@@ -5889,7 +5898,7 @@ mod protocol {
         let cases = [
             (
                 "colonless",
-                "def main: U32\n  1\n",
+                "def main() -> U32:\n  1\n",
                 1,
                 0,
                 2,
@@ -5916,7 +5925,7 @@ mod protocol {
             ),
             (
                 "nested-block",
-                "def choose(value):\n  match value: # 🦀\n  case None:\n    0\n",
+                "def choose(value) -> U32:\n  match value: # 🦀\n  case None:\n    0\n",
                 2,
                 2,
                 2,
@@ -5925,7 +5934,7 @@ mod protocol {
             ),
             (
                 "literal-and-comment-colons",
-                "def main: String\n  \"# 🦀:\" # comment:\n  \"next\"\n",
+                "def main() -> String:\n  \"# 🦀:\" # comment:\n  \"next\"\n",
                 2,
                 0,
                 2,
@@ -5943,7 +5952,7 @@ mod protocol {
             ),
             (
                 "incomplete-literal",
-                "def main: String\n  \"🦀:\n    next\n",
+                "def main() -> String:\n  \"🦀:\n    next\n",
                 2,
                 0,
                 2,
@@ -5979,7 +5988,7 @@ mod protocol {
     fn b1_navigation_respects_parameter_shadowing_and_annotation_scope() {
         let temp = tempdir().must_be("temporary workspace");
         let main_path = temp.path().join("main.bend");
-        let source = "def target(value):\n  value\ndef shadow(target):\n  target(1)\ndef annotated(target: U32):\n  target\ntype Hidden:\n  One\ndef named(invisible: Hidden):\n  invisible\ndef unknown:\n  invisible\n";
+        let source = "def target(value) -> U32:\n  value\ndef shadow(target) -> U32:\n  target(1)\ndef annotated(target: U32) -> U32:\n  target\ntype Hidden is Data:\n  One{}\ndef named(invisible: Hidden) -> U32:\n  invisible\ndef unknown() -> U32:\n  invisible\n";
         fs::write(&main_path, source).must_be("write source");
         let uri = Url::from_file_path(&main_path)
             .must_be("source URI")
@@ -5994,11 +6003,15 @@ mod protocol {
             }}),
         );
         let position = json!({"textDocument":{"uri":uri},"position":{"line":3,"character":3}});
-        for method in [
-            "textDocument/definition",
-            "textDocument/hover",
-            "textDocument/typeDefinition",
-        ] {
+        let binder = client.request("textDocument/definition", position.clone());
+        assert_eq!(
+            binder["result"],
+            json!({
+                "uri":uri,"range":{"start":{"line":2,"character":11},"end":{"line":2,"character":17}}
+            }),
+            "a shadowing parameter is the definition of its uses"
+        );
+        for method in ["textDocument/hover", "textDocument/typeDefinition"] {
             let response = client.request(method, position.clone());
             assert_eq!(
                 response["result"],
@@ -6069,19 +6082,20 @@ mod protocol {
                 "textDocument":{"uri":uri,"version":1},
                 "edits":[
                     {"range":{"start":{"line":0,"character":21},"end":{"line":0,"character":25}},"newText":"NewLeft"},
+                    {"range":{"start":{"line":2,"character":2},"end":{"line":2,"character":6}},"newText":"NewLeft"},
                     {"range":{"start":{"line":4,"character":2},"end":{"line":4,"character":6}},"newText":"NewLeft"}
                 ]
             }]),
-            "rename must preserve the shadowed parameter and its member access"
+            "a local never hides a qualified name"
         );
     }
 
     #[test]
-    fn b2_b3_module_cursor_resolution_rejects_shadowed_members_and_renames_aliases() {
+    fn b2_b3_qualified_names_beside_a_same_named_local_follow_the_alias() {
         let temp = tempdir().must_be("temporary workspace");
         let main_path = temp.path().join("main.bend");
         let dep_path = temp.path().join("dep.bend");
-        let source = "import ./dep.bend as Left\ndef shadow(Left):\n  Left.shared(1)\ndef main: U32\n  Left.shared(1)\n";
+        let source = "import ./dep.bend as Left\ndef shadow(Left) -> U32:\n  Left.shared(1)\ndef main() -> U32:\n  Left.shared(1)\n";
         fs::write(&main_path, source).must_be("write source");
         fs::write(&dep_path, "def shared(x: U32) -> U32:\n  x\n").must_be("write dependency");
         let uri = Url::from_file_path(&main_path)
@@ -6094,46 +6108,28 @@ mod protocol {
         let mut client = spawn_client(&compiler_dir);
         client.initialize(temp.path());
         open_clean_document(&mut client, &uri, source);
-        for method in [
-            "textDocument/definition",
-            "textDocument/hover",
-            "textDocument/rename",
-            "textDocument/references",
-            "textDocument/documentHighlight",
-            "textDocument/typeDefinition",
-        ] {
-            let response = client.request(
-                method,
-                json!({
-                    "textDocument":{"uri":uri},"position":{"line":2,"character":8},
-                    "newName":"changed","context":{"includeDeclaration":true}
-                }),
-            );
-            assert_eq!(
-                response["result"],
-                Value::Null,
-                "shadowed qualifier member: {method}"
-            );
-        }
-        for (line, character) in [(0, 21), (4, 3)] {
-            for method in [
-                "textDocument/hover",
-                "textDocument/references",
-                "textDocument/documentHighlight",
-            ] {
-                let response = client.request(
-                    method,
-                    json!({
-                        "textDocument":{"uri":uri},"position":{"line":line,"character":character},
-                        "newName":"NewLeft","context":{"includeDeclaration":true}
-                    }),
-                );
-                assert_eq!(
-                    response["result"],
-                    Value::Null,
-                    "unsupported module alias: {method}"
-                );
-            }
+        let alias_ranges = [(0, 21, 25), (2, 2, 6), (4, 2, 6)];
+        for (line, character) in [(0, 21), (2, 3), (4, 3)] {
+            let position = json!({
+                "textDocument":{"uri":uri},"position":{"line":line,"character":character},
+                "context":{"includeDeclaration":true}
+            });
+            let references = client.request("textDocument/references", position.clone());
+            let expected: Vec<_> = alias_ranges
+                .iter()
+                .map(|(line, start, end)| json!({
+                    "uri":uri,"range":{"start":{"line":line,"character":start},"end":{"line":line,"character":end}}
+                }))
+                .collect();
+            assert_eq!(references["result"], json!(expected), "alias references");
+            let highlights = client.request("textDocument/documentHighlight", position);
+            let expected: Vec<_> = alias_ranges
+                .iter()
+                .map(|(line, start, end)| json!({
+                    "range":{"start":{"line":line,"character":start},"end":{"line":line,"character":end}},"kind":1
+                }))
+                .collect();
+            assert_eq!(highlights["result"], json!(expected), "alias highlights");
             assert_module_alias_rename(&mut client, &uri, line, character);
         }
         let alias_definition = client.request(
@@ -6148,8 +6144,14 @@ mod protocol {
                 "uri":dep_uri,"range":{"start":{"line":0,"character":0},"end":{"line":0,"character":0}}
             })
         );
+        let beside_local = json!({"textDocument":{"uri":uri},"position":{"line":2,"character":8}});
         let member_position =
             json!({"textDocument":{"uri":uri},"position":{"line":4,"character":8}});
+        assert_eq!(
+            client.request("textDocument/definition", beside_local)["result"]["uri"],
+            json!(dep_uri),
+            "a local never hides a qualified name"
+        );
         let definition = client.request("textDocument/definition", member_position.clone());
         assert_eq!(
             definition["result"],
@@ -6170,7 +6172,10 @@ mod protocol {
         assert_eq!(
             renamed["result"],
             json!({"changes":{
-                (uri):[{"range":{"start":{"line":4,"character":7},"end":{"line":4,"character":13}},"newText":"renamed"}],
+                (uri):[
+                    {"range":{"start":{"line":2,"character":7},"end":{"line":2,"character":13}},"newText":"renamed"},
+                    {"range":{"start":{"line":4,"character":7},"end":{"line":4,"character":13}},"newText":"renamed"}
+                ],
                 (dep_uri):[{"range":{"start":{"line":0,"character":4},"end":{"line":0,"character":10}},"newText":"renamed"}]
             }})
         );
@@ -6207,7 +6212,7 @@ mod protocol {
         let root_path = temp.path().join("root.bend");
         let dependency_path = temp.path().join("dep.bend");
         let gate_path = temp.path().join("gate.bend");
-        let root_source = "import ./dep.bend as Dep\ndef main: Type\n  Dep.value\n";
+        let root_source = "import ./dep.bend as Dep\ndef main() -> Type:\n  Dep.value\n";
         let gate_source = "def gate() -> U32:\n  0\n";
         for (path, source) in [
             (&root_path, root_source),
@@ -6321,10 +6326,11 @@ mod protocol {
         let main_path = temp.path().join("main.bend");
         let dep_path = temp.path().join("dep.bend");
         let consumer_path = temp.path().join("consumer.bend");
-        let main_source = "import ./dep.bend as Dep\nimport ./consumer.bend as Consumer\ndef main: U32\n  Dep.shared(1)\n";
+        let main_source = "import ./dep.bend as Dep\nimport ./consumer.bend as Consumer\ndef main() -> U32:\n  Dep.shared(1)\n";
         let dep_source = "def shared(x: U32) -> U32:\n  x\n";
-        let consumer_source = "import ./dep.bend as Dep\ndef consume: U32\n  Dep.shared(2)\n";
-        let updated_consumer = format!("{consumer_source}  Dep.shared(3)\n");
+        let consumer_source = "import ./dep.bend as Dep\ndef consume() -> U32:\n  Dep.shared(2)\n";
+        let updated_consumer =
+            "import ./dep.bend as Dep\ndef consume() -> U32:\n  Dep.shared(\n  Dep.shared(3))\n";
         for (path, source) in [
             (&main_path, main_source),
             (&dep_path, dep_source),
@@ -6377,7 +6383,7 @@ mod protocol {
             &mut client,
             writer,
             &consumer_path,
-            &updated_consumer,
+            updated_consumer,
             &main_uri,
         );
 
@@ -6420,9 +6426,9 @@ mod protocol {
         let dep_path = temp.path().join("dep.bend");
         let gate_path = temp.path().join("gate.bend");
         let unrelated_path = temp.path().join("unrelated.bend");
-        let main_source = "import ./dep.bend as Dep\ndef main: U32\n  Dep.clamp(1)\n";
+        let main_source = "import ./dep.bend as Dep\ndef main() -> U32:\n  Dep.clamp(1)\n";
         let dep_source = "def clamp(x: U32) -> U32:\n  x\n";
-        let unrelated_source = "def stable: U32\n  1\ndef unrelated: U32\n  stable\n";
+        let unrelated_source = "def stable() -> U32:\n  1\ndef unrelated() -> U32:\n  stable\n";
         for (path, source) in [
             (&main_path, main_source),
             (&dep_path, dep_source),
@@ -6480,11 +6486,11 @@ mod protocol {
             "an unrelated committed query must complete while dependency staging is held"
         );
         writer
-            .write_all(b"def gate: U32\n  1\n")
+            .write_all(b"def gate() -> U32:\n  1\n")
             .must_be("release dependency import snapshot");
         drop(writer);
         fs::remove_file(&gate_path).must_be("remove released dependency FIFO");
-        fs::write(&gate_path, "def gate: U32\n  1\n").must_be("restore regular imported file");
+        fs::write(&gate_path, "def gate() -> U32:\n  1\n").must_be("restore regular imported file");
         let expected = json!({
             "uri":dep_uri,
             "range":{"start":{"line":2,"character":4},"end":{"line":2,"character":9}}
@@ -6516,12 +6522,13 @@ mod protocol {
         let second_path = temp.path().join("second.bend");
         let third_path = temp.path().join("third.bend");
         let sentinel_path = temp.path().join("sentinel.bend");
-        let main_source = "import ./consumer.bend as Consumer\nimport ./third.bend as Third\ndef main: U32\n  Third.shared(1)\n";
-        let initial_consumer = "import ./first.bend as Dep\ndef consume: U32\n  Dep.shared(2)\n";
-        let open_consumer = "import ./second.bend as Dep\ndef consume: U32\n  Dep.shared(2)\n";
-        let disk_consumer = "import ./third.bend as Dep\ndef consume: U32\n  Dep.shared(2)\n";
+        let main_source = "import ./consumer.bend as Consumer\nimport ./third.bend as Third\ndef main() -> U32:\n  Third.shared(1)\n";
+        let initial_consumer =
+            "import ./first.bend as Dep\ndef consume() -> U32:\n  Dep.shared(2)\n";
+        let open_consumer = "import ./second.bend as Dep\ndef consume() -> U32:\n  Dep.shared(2)\n";
+        let disk_consumer = "import ./third.bend as Dep\ndef consume() -> U32:\n  Dep.shared(2)\n";
         let dep_source = "def shared(x: U32) -> U32:\n  x\n";
-        let sentinel_source = "def sentinel: U32\n  1\n";
+        let sentinel_source = "def sentinel() -> U32:\n  1\n";
         for (path, source) in [
             (&main_path, main_source),
             (&consumer_path, initial_consumer),
@@ -6613,7 +6620,7 @@ mod protocol {
     fn parameter_annotation_navigation_keeps_nested_type_boundaries() {
         let temp = tempdir().must_be("temporary workspace");
         let path = temp.path().join("main.bend");
-        let source = "type Hidden:\n  One\ndef typed(simple: U32, nested: (Hidden, List(U32)), tail: Hidden):\n  simple\n  nested\n  tail\n";
+        let source = "type Hidden is Data:\n  One{}\ndef typed(simple: U32, nested: Hidden & List<U32>, tail: Hidden) -> U32:\n  (simple,\n  nested,\n  tail)\n";
         fs::write(&path, source).must_be("write annotation source");
         let uri = regression_file_uri(&path);
         let compiler_dir = install_compiler_stub(&temp.path().join("bin"));
@@ -6622,7 +6629,7 @@ mod protocol {
         open_clean_document(&mut client, &uri, source);
         for (line, name, annotation) in [
             (3, "simple", "U32"),
-            (4, "nested", "(Hidden, List(U32))"),
+            (4, "nested", "Hidden & List<U32>"),
             (5, "tail", "Hidden"),
         ] {
             let hover = client.request(

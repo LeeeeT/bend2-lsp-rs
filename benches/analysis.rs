@@ -36,80 +36,33 @@ static CONSTRUCTOR_SNAPSHOT: LazyLock<analysis::DocumentSnapshot> = LazyLock::ne
     )
 });
 
-static PARAMETER_SNAPSHOT: LazyLock<analysis::DocumentSnapshot> = LazyLock::new(|| {
-    analysis::DocumentSnapshot::new(
-        analysis::Revision(0),
-        "def typed(builtin: U32, qualified: Ast.Term, nested: (Ast.Term, List(U32))) -> U32:\n  builtin\n".to_owned(),
-    )
-});
-
 const COMPLETION_SOURCE: &str = "type Shape is Data:\n  Circle{}\ntype Wrapped is Data:\n  Box{value: Shape}\ndef main(value: Wrapped):\n  match value:\n    case Box{Ci";
 static COMPLETION_SNAPSHOT: LazyLock<analysis::DocumentSnapshot> = LazyLock::new(|| {
     analysis::DocumentSnapshot::new(analysis::Revision(0), COMPLETION_SOURCE.to_owned())
 });
 
-fn parameter_annotation_case(
-    index: usize,
-) -> (&'static analysis::DocumentSnapshot, analysis::SymbolId) {
-    let snapshot = LazyLock::force(&PARAMETER_SNAPSHOT);
-    let declaration = snapshot
-        .syntax
-        .symbols()
-        .first()
-        .must_be("typed declaration");
-    let parameter = snapshot
-        .syntax
-        .parameters(declaration)
-        .get(index)
-        .must_be("indexed parameter");
-    (snapshot, parameter.id)
-}
-
 struct WarmSnapshot {
-    source: &'static str,
     snapshot: &'static analysis::DocumentSnapshot,
-    completion_prefix: &'static str,
-    identifier_name: &'static str,
 }
 
 impl WarmSnapshot {
     fn small() -> Self {
         Self {
-            source: SOURCE,
             snapshot: &SMALL_SNAPSHOT,
-            completion_prefix: "transform_",
-            identifier_name: "transform_31",
         }
     }
 
     fn medium() -> Self {
         Self {
-            source: MEDIUM_SOURCE,
             snapshot: &MEDIUM_SNAPSHOT,
-            completion_prefix: "worker_",
-            identifier_name: "worker_0199",
         }
     }
 
     fn large() -> Self {
         Self {
-            source: LARGE_SOURCE,
             snapshot: &LARGE_SNAPSHOT,
-            completion_prefix: "worker_",
-            identifier_name: "worker_0599",
         }
     }
-}
-
-fn scoped_completion_case(fixture: &WarmSnapshot) -> (&'static analysis::DocumentSnapshot, usize) {
-    let declaration = fixture
-        .snapshot
-        .syntax
-        .symbols()
-        .iter()
-        .find(|symbol| symbol.kind == analysis::SymbolKind::Function)
-        .must_be("function with local parameters");
-    (fixture.snapshot, declaration.scope.end.saturating_sub(1))
 }
 
 fn folding_source(lines: usize) -> String {
@@ -370,89 +323,10 @@ fn cold_snapshot_build_large() -> analysis::DocumentSnapshot {
 #[bench::small(WarmSnapshot::small())]
 #[bench::medium(WarmSnapshot::medium())]
 #[bench::large(WarmSnapshot::large())]
-fn semantic_tokens_warm(fixture: WarmSnapshot) -> Vec<analysis::SemanticToken> {
-    std::hint::black_box(analysis::semantic_tokens(std::hint::black_box(
+fn document_symbols_warm(fixture: WarmSnapshot) -> Vec<analysis::Symbol> {
+    std::hint::black_box(analysis::document_symbols(std::hint::black_box(
         fixture.snapshot,
     )))
-}
-
-#[library_benchmark]
-#[bench::small(WarmSnapshot::small())]
-#[bench::medium(WarmSnapshot::medium())]
-#[bench::large(WarmSnapshot::large())]
-fn completion_warm(fixture: WarmSnapshot) -> Vec<analysis::Completion> {
-    std::hint::black_box(analysis::completion_items(
-        std::hint::black_box(fixture.snapshot),
-        std::hint::black_box(fixture.completion_prefix),
-    ))
-}
-
-#[library_benchmark]
-#[bench::small(scoped_completion_case(&WarmSnapshot::small()))]
-#[bench::medium(scoped_completion_case(&WarmSnapshot::medium()))]
-#[bench::large(scoped_completion_case(&WarmSnapshot::large()))]
-fn scoped_completion_warm(
-    (snapshot, offset): (&analysis::DocumentSnapshot, usize),
-) -> Vec<analysis::Completion> {
-    std::hint::black_box(analysis::scoped_completion_items(
-        std::hint::black_box(snapshot),
-        std::hint::black_box(offset),
-        std::hint::black_box(""),
-    ))
-}
-
-#[library_benchmark]
-#[bench::small(WarmSnapshot::small())]
-#[bench::medium(WarmSnapshot::medium())]
-#[bench::large(WarmSnapshot::large())]
-fn identifier_ranges_warm(fixture: WarmSnapshot) -> Vec<analysis::TextRange> {
-    std::hint::black_box(analysis::identifier_ranges(
-        std::hint::black_box(fixture.snapshot),
-        std::hint::black_box(fixture.identifier_name),
-    ))
-}
-
-#[library_benchmark]
-#[bench::small(WarmSnapshot::small())]
-#[bench::medium(WarmSnapshot::medium())]
-#[bench::large(WarmSnapshot::large())]
-fn references_warm(fixture: WarmSnapshot) -> Vec<analysis::Reference> {
-    let snapshot = fixture.snapshot;
-    let references = snapshot
-        .syntax
-        .name_id(&snapshot.text, "identity")
-        .and_then(|name| snapshot.syntax.symbol_by_name(name))
-        .map_or_else(Vec::new, |symbol| {
-            snapshot.syntax.references(symbol.id).copied().collect()
-        });
-    std::hint::black_box(references)
-}
-
-#[library_benchmark]
-#[bench::small(WarmSnapshot::small())]
-#[bench::medium(WarmSnapshot::medium())]
-#[bench::large(WarmSnapshot::large())]
-fn call_hierarchy_warm(fixture: WarmSnapshot) -> Vec<analysis::CallSite> {
-    let snapshot = fixture.snapshot;
-    let calls = snapshot
-        .syntax
-        .name_id(&snapshot.text, "identity")
-        .and_then(|name| snapshot.syntax.symbol_by_name(name))
-        .map_or_else(Vec::new, |symbol| {
-            snapshot.syntax.calls_to(symbol.id).copied().collect()
-        });
-    std::hint::black_box(calls)
-}
-
-#[library_benchmark]
-#[bench::small(WarmSnapshot::small())]
-#[bench::medium(WarmSnapshot::medium())]
-#[bench::large(WarmSnapshot::large())]
-fn inlay_hints_warm(fixture: WarmSnapshot) -> Vec<analysis::InlayHint> {
-    std::hint::black_box(analysis::inlay_hints(
-        std::hint::black_box(fixture.snapshot),
-        analysis::TextRange::new(0, fixture.source.len()),
-    ))
 }
 
 fn setup_ascii_position(source: &'static str) -> &'static str {
@@ -567,59 +441,6 @@ fn workspace_incremental_invalidation(mut fixture: LoadedWorkspace) -> Vec<works
 }
 
 #[library_benchmark]
-#[bench::hundred_files(LoadedWorkspace::default())]
-fn workspace_references(fixture: LoadedWorkspace) -> Vec<(usize, analysis::TextRange)> {
-    let common_uri = url::Url::from_file_path(&fixture.files.paths[WORKSPACE_FILE_COUNT - 1])
-        .must_be("common URI");
-    let common = fixture
-        .database
-        .cached_document(&common_uri)
-        .must_be("cached common document");
-    let target = common
-        .syntax
-        .name_id(&common.text, "identity")
-        .and_then(|name| common.syntax.symbol_by_name(name))
-        .must_be("common identity symbol");
-    let name = common.syntax.name_text(&common.text, target.name);
-    let documents = fixture.database.indexed_documents();
-    let mut references = Vec::new();
-
-    for (document_index, document) in documents.iter().enumerate() {
-        if document.uri == common_uri {
-            references.extend(
-                document
-                    .syntax
-                    .references(target.id)
-                    .map(|reference| (document_index, reference.range)),
-            );
-            continue;
-        }
-
-        let Some(name_id) = document.syntax.name_id(&document.text, name) else {
-            continue;
-        };
-        let imports = analysis::imports(document);
-        let Some(alias) = imports.iter().find_map(|import| {
-            let target_document = fixture.database.import_target(&document.uri, import.path)?;
-            (target_document.uri == common_uri)
-                .then(|| import.alias_text(&document.text))
-                .flatten()
-        }) else {
-            continue;
-        };
-        for reference in document.syntax.references_named(name_id) {
-            if reference.qualifier.is_some_and(|qualifier| {
-                document.syntax.name_text(&document.text, qualifier) == alias
-            }) {
-                references.push((document_index, reference.range));
-            }
-        }
-    }
-    references.sort_unstable_by_key(|(file, range)| (*file, range.start, range.end));
-    std::hint::black_box(references)
-}
-
-#[library_benchmark]
 #[bench::empty(LoadedWorkspace::default(), "")]
 #[bench::case_insensitive(LoadedWorkspace::default(), "CoMmOn_WoRkEr_")]
 fn workspace_symbols_warm(
@@ -729,21 +550,7 @@ fn constructor_completion_warm(
 ) -> Vec<analysis::Completion> {
     std::hint::black_box(analysis::constructor_completion_items(
         std::hint::black_box(snapshot),
-        None,
         std::hint::black_box(prefix),
-    ))
-}
-
-#[library_benchmark]
-#[bench::builtin(parameter_annotation_case(0))]
-#[bench::qualified(parameter_annotation_case(1))]
-#[bench::nested(parameter_annotation_case(2))]
-fn parameter_annotation_warm(
-    (snapshot, parameter): (&analysis::DocumentSnapshot, analysis::SymbolId),
-) -> Option<analysis::TextRange> {
-    std::hint::black_box(snapshot.syntax.binding_type_range(
-        std::hint::black_box(&snapshot.text),
-        std::hint::black_box(parameter),
     ))
 }
 
@@ -757,13 +564,11 @@ fn cold_completion_context_build() -> analysis::DocumentSnapshot {
 
 #[library_benchmark]
 #[bench::nested(LazyLock::force(&COMPLETION_SNAPSHOT))]
-fn pattern_completion_context_warm(
-    snapshot: &analysis::DocumentSnapshot,
-) -> Option<analysis::CasePatternType> {
+fn pattern_completion_context_warm(snapshot: &analysis::DocumentSnapshot) -> bool {
     std::hint::black_box(
         snapshot
             .syntax
-            .case_pattern_type(std::hint::black_box(snapshot.text.len())),
+            .in_case_pattern(std::hint::black_box(snapshot.text.len())),
     )
 }
 
@@ -818,14 +623,13 @@ fn workspace_symbol_response_warm(
 library_benchmark_group!(
     name = analysis_hot_paths;
     benchmarks = cold_snapshot_build_small, cold_snapshot_build_medium, cold_snapshot_build_large,
-        semantic_tokens_warm, completion_warm, scoped_completion_warm, identifier_ranges_warm, references_warm,
-        call_hierarchy_warm, inlay_hints_warm,
+        document_symbols_warm,
         ascii_position_conversion, ascii_offset_conversion,
         unicode_position_conversion, unicode_offset_conversion,
         folding_100_lines, folding_1000_lines, folding_10000_lines,
         workspace_initial_build, workspace_incremental_invalidation,
-        workspace_references, workspace_burst_revision_invalidation, workspace_orphan_graph_release,
-        constructor_definition_warm, constructor_completion_warm, parameter_annotation_warm,
+        workspace_burst_revision_invalidation, workspace_orphan_graph_release,
+        constructor_definition_warm, constructor_completion_warm,
         cold_completion_context_build, pattern_completion_context_warm,
         import_completion_candidates_warm, workspace_symbols_warm, workspace_symbol_response_warm
 );

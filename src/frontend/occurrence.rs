@@ -25,8 +25,9 @@ pub enum Meaning {
     Binder(Binder),
     /// Uses a local binder.
     Local(Binder),
-    /// Uses the top-level name or constructor with this book key.
-    Global { key: String },
+    /// Uses the top-level name (`ctr` is false) or the constructor with this
+    /// book key. A type and its constructor can share a key.
+    Global { key: String, ctr: bool },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -73,7 +74,7 @@ pub(super) fn settle(recorded: Vec<Recorded>) -> Vec<Occurrence> {
         .filter_map(|record| {
             let meaning = match record.event {
                 Event::Settled(meaning) => meaning,
-                Event::Fallback { key } => Meaning::Global { key },
+                Event::Fallback { key } => Meaning::Global { key, ctr: false },
                 Event::Operator | Event::Plus { .. } => return None,
             };
             Some(Occurrence {

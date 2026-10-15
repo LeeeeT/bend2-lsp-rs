@@ -1,281 +1,322 @@
-use super::super::{adapters, lsp::Backend};
-use super::shared::{binding_at, binding_ranges, declaration_token_at};
-use crate::{analysis, workspace::Document};
-use std::collections::HashMap;
+use super::super::{
+    adapters,
+    lsp::Backend,
+    reference_locations::sort_and_deduplicate,
+    semantics::{Reading, file_uri, lsp_range, name_at, named_range, readings},
+};
+use super::import_edits::versioned_edit;
+use crate::{
+    analysis::{self, TextRange},
+    frontend::{Binder, Meaning},
+    semantic::{DeclarationKind, Identity, Semantics, Target},
+    workspace::Document,
+};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tower_lsp::{
     jsonrpc::{Error, Result},
     lsp_types::{
-        CodeLens, CodeLensParams, DocumentChanges, DocumentHighlight, DocumentHighlightKind,
-        DocumentHighlightParams, Location, OneOf, OptionalVersionedTextDocumentIdentifier,
-        PrepareRenameResponse, ReferenceParams, RenameParams, TextDocumentEdit,
+        CodeLens, CodeLensParams, DocumentHighlight, DocumentHighlightKind,
+        DocumentHighlightParams, Location, PrepareRenameResponse, ReferenceParams, RenameParams,
         TextDocumentPositionParams, TextEdit, WorkspaceEdit,
     },
 };
 use url::Url;
 
-enum RenameKind {
-    Alias(analysis::IndexedImport),
-    Binding(analysis::SymbolId),
-    Symbol { uri: Url, name: String },
+/// What a cursor names, for references and rename.
+#[derive(Clone)]
+enum Subject {
+    Local(Binder),
+    Global(Identity),
+    /// An import alias of the document, and the namespace it names.
+    Alias {
+        alias: String,
+        sub: String,
+    },
 }
 
-struct RenameTarget {
-    range: analysis::TextRange,
-    kind: RenameKind,
+fn invalid(message: &str) -> Error {
+    Error::invalid_params(message.to_owned())
 }
 
-fn alias_root(document: &Document, token: analysis::TokenId) -> bool {
-    let syntax = &document.syntax;
-    let Some(range) = syntax.token(token).map(|token| token.range) else {
-        return false;
-    };
-    // Import paths are module links, never alias usages, even when a path
-    // segment has the same spelling as an explicit alias.
-    if analysis::imports(document)
-        .iter()
-        .any(|import| import.path.contains(range.start))
-        || syntax.symbol_for_token(token).is_some()
-        || token.0.checked_sub(1).is_some_and(|previous| {
-            let previous = analysis::TokenId(previous);
-            syntax
-                .token(previous)
-                .is_some_and(|token| token.range.end == range.start)
-                && syntax.token_text(&document.text, previous) == Some(".")
-        })
-    {
-        return false;
-    }
-    let dot = analysis::TokenId(token.0 + 1);
-    syntax
-        .token(dot)
-        .is_some_and(|dot_token| dot_token.range.start == range.end)
-        && syntax.token_text(&document.text, dot) == Some(".")
+fn is_name(name: &str, dotted: bool) -> bool {
+    let valid = name.split('.').all(|segment| {
+        let mut chars = segment.chars();
+        chars
+            .next()
+            .is_some_and(|head| head.is_ascii_alphabetic() || head == '_')
+            && chars.all(|rest| rest.is_ascii_alphanumeric() || rest == '_')
+    });
+    valid && (dotted || !name.contains('.')) && !analysis::SyntaxIndex::is_keyword_text(name)
 }
 
-fn alias_at(document: &Document, offset: usize) -> Option<analysis::IndexedImport> {
-    let token = document.syntax.token_at_or_before(offset)?;
-    let range = document.syntax.token(token)?.range;
-    if offset < range.start || offset > range.end {
-        return None;
-    }
-    let text = document.syntax.token_text(&document.text, token)?;
-    analysis::imports(document).iter().copied().find(|import| {
-        import.alias == Some(range)
-            || import.alias_text(&document.text) == Some(text) && alias_root(document, token)
-    })
-}
-
-fn alias_ranges(document: &Document, import: analysis::IndexedImport) -> Vec<analysis::TextRange> {
-    let Some(alias) = import.alias else {
+/// The names of a document's entry that a subject covers, and whether each is
+/// implicit. Each range is the part that names the subject: the declared name
+/// after an alias, or the alias itself.
+fn covered(semantics: &Semantics, subject: &Subject, declarations: bool) -> Vec<(TextRange, bool)> {
+    let Some(entry) = semantics.entry() else {
         return Vec::new();
     };
-    let mut ranges = vec![alias];
-    if let Some(name) = document.syntax.name_id(
-        &document.text,
-        import.alias_text(&document.text).unwrap_or(""),
-    ) {
-        ranges.extend(
-            document
-                .syntax
-                .qualified_references(name)
-                .filter_map(|reference| reference.qualifier_token)
-                .filter(|token| alias_root(document, *token))
-                .filter_map(|token| document.syntax.token(token).map(|token| token.range)),
-        );
+    let mut out = Vec::new();
+    for name in &entry.names {
+        let text = entry
+            .source
+            .get(name.range.start..name.range.end)
+            .unwrap_or_default();
+        match subject {
+            Subject::Local(binder) => match name.meaning {
+                Meaning::Local(found) if found == *binder => out.push((name.range, name.implicit)),
+                Meaning::Binder(found) if found == *binder && declarations => {
+                    out.push((name.range, false));
+                }
+                _ => {}
+            },
+            Subject::Global(identity) => {
+                let declaration = matches!(name.meaning, Meaning::Declaration { .. });
+                if (declarations || !declaration)
+                    && semantics.target(name) == Target::Global(identity.clone())
+                {
+                    out.push((named_range(&entry.source, name, identity), name.implicit));
+                }
+            }
+            Subject::Alias { alias, sub } => {
+                let through = matches!(
+                    &name.meaning,
+                    Meaning::Global { key, .. } if key.split_once(':').is_some_and(|(ns, _)| ns == sub)
+                );
+                if !name.implicit && through && text.starts_with(&format!("{alias}.")) {
+                    out.push((
+                        TextRange::new(name.range.start, name.range.start + alias.len()),
+                        false,
+                    ));
+                }
+            }
+        }
     }
-    ranges
+    out
 }
 
-fn rename_alias(
-    document: &Document,
-    import: analysis::IndexedImport,
-    new_name: &str,
-) -> Result<WorkspaceEdit> {
-    let ranges = alias_ranges(document, import);
-    let bytes = new_name.as_bytes();
-    let valid = bytes
-        .first()
-        .is_some_and(|byte| byte.is_ascii_alphabetic() || *byte == b'_')
-        && bytes
-            .iter()
-            .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-        && !analysis::SyntaxIndex::is_keyword_text(new_name);
-    let conflict = analysis::imports(document).iter().any(|other| {
-        other.alias != import.alias
-            && (other.alias_text(&document.text) == Some(new_name)
-                || other.alias_text(&document.text) == import.alias_text(&document.text))
-    }) || document
-        .syntax
-        .name_id(&document.text, new_name)
-        .is_some_and(|name| {
-            document.syntax.symbol_by_name(name).is_some()
-                || document.syntax.constructor_by_name(name).is_some()
-                || ranges.iter().any(|range| {
-                    document
-                        .syntax
-                        .bindings_at(range.start)
-                        .any(|binding| binding.name == name)
-                })
-        });
-    if !valid || conflict {
-        return Err(Error::invalid_params(
-            "Module alias rename would produce an invalid or conflicting name",
-        ));
-    }
-    let edits = ranges
-        .into_iter()
-        .map(|range| {
-            OneOf::Left(TextEdit {
-                range: adapters::range(document, range),
-                new_text: new_name.into(),
-            })
-        })
-        .collect();
-    Ok(WorkspaceEdit {
-        document_changes: Some(DocumentChanges::Edits(vec![TextDocumentEdit {
-            text_document: OptionalVersionedTextDocumentIdentifier {
-                uri: document.uri.clone(),
-                version: Some(document.revision.0),
-            },
-            edits,
-        }])),
-        ..Default::default()
-    })
+/// The alias tokens of a document's import lines that declare `alias`.
+fn alias_declarations(document: &Document, alias: &str) -> Vec<TextRange> {
+    analysis::imports(document)
+        .iter()
+        .filter(|import| import.alias_text(&document.text) == Some(alias))
+        .filter_map(|import| import.alias)
+        .collect()
 }
 
 impl Backend {
-    fn rename_target(&self, document: &Document, offset: usize) -> Result<Option<RenameTarget>> {
-        if analysis::imports(document)
-            .iter()
-            .any(|import| import.path.start <= offset && offset <= import.path.end)
-        {
-            return Err(Error::invalid_params(
-                "Import paths cannot be renamed with Rename Symbol; rename the file or folder in the project tree instead",
+    /// What the cursor names, and the range that a rename replaces there.
+    fn subject_at(
+        semantics: &Semantics,
+        document: &Document,
+        offset: usize,
+    ) -> Option<(Subject, TextRange)> {
+        let entry = semantics.entry()?;
+        for import in analysis::imports(document) {
+            let Some(range) = import
+                .alias
+                .filter(|range| range.start <= offset && offset <= range.end)
+            else {
+                continue;
+            };
+            let alias = import.alias_text(&document.text)?.to_owned();
+            let (_, sub) = entry.aliases.iter().find(|(name, _)| *name == alias)?;
+            return Some((
+                Subject::Alias {
+                    alias,
+                    sub: sub.clone(),
+                },
+                range,
             ));
         }
-        if document.syntax.is_in_comment_or_string(offset) {
-            return Ok(None);
-        }
-        let Some(cursor) = document.syntax.token_at_or_before(offset) else {
-            return Ok(None);
-        };
-        let Some(token) = document.syntax.token(cursor) else {
-            return Ok(None);
-        };
-        if token.kind != analysis::TokenKind::Identifier
-            || offset < token.range.start
-            || offset > token.range.end
+        let name = name_at(semantics, offset)?;
+        let text = entry.source.get(name.range.start..name.range.end)?;
+        if let Some((alias, _)) = text.split_once('.')
+            && offset < name.range.start + alias.len()
+            && let Some((_, sub)) = entry.aliases.iter().find(|(found, _)| found == alias)
         {
-            return Ok(None);
+            let range = TextRange::new(name.range.start, name.range.start + alias.len());
+            let subject = Subject::Alias {
+                alias: alias.to_owned(),
+                sub: sub.clone(),
+            };
+            return Some((subject, range));
         }
-        let range = document
-            .syntax
-            .reference_for_token(cursor)
-            .map_or(token.range, |reference| reference.range);
-        if let Some(import) = alias_at(document, offset) {
-            return Ok(Some(RenameTarget {
-                range,
-                kind: RenameKind::Alias(import),
-            }));
+        match semantics.target(name) {
+            Target::Local { binder, .. } => Some((Subject::Local(binder), name.range)),
+            Target::Global(identity) => {
+                let prefix = text.strip_suffix(identity.name.as_str())?;
+                let range = TextRange::new(name.range.start + prefix.len(), name.range.end);
+                (range.start <= offset).then_some((Subject::Global(identity), range))
+            }
+            Target::Unresolved { .. } => None,
         }
-        if let Some(symbol) = binding_at(document, offset) {
-            return Ok(Some(RenameTarget {
-                range,
-                kind: RenameKind::Binding(symbol),
-            }));
-        }
-        let Some(token) = declaration_token_at(document, offset) else {
-            return Ok(None);
-        };
-        let (uri, snapshot, name) = self.symbol_source(document, &token);
-        // The workspace reference index supports declarations represented as
-        // symbols. Do not offer a preview for targets rename cannot edit.
-        if snapshot
-            .syntax
-            .name_id(&snapshot.text, &name)
-            .and_then(|name| snapshot.syntax.symbol_by_name(name))
-            .is_none()
-        {
-            return Ok(None);
-        }
-        Ok(Some(RenameTarget {
-            range,
-            kind: RenameKind::Symbol { uri, name },
-        }))
     }
 
-    pub(in crate::server) async fn handle_prepare_rename(
+    async fn subject(
         &self,
-        params: TextDocumentPositionParams,
-    ) -> Result<Option<PrepareRenameResponse>> {
-        let _workspace_read = self.workspace_ready_read().await;
-        let Some(doc) = self.document(&params.text_document.uri) else {
-            return Ok(None);
-        };
-        if !Self::supported(&doc) {
-            return Ok(None);
+        uri: &Url,
+        position: tower_lsp::lsp_types::Position,
+    ) -> Option<(Document, Arc<Semantics>, Subject, TextRange)> {
+        let document = self.workspace.read().cached_document(uri)?;
+        if !Self::supported(&document) {
+            return None;
         }
-        let offset = adapters::offset_at(&doc, params.position);
-        let Some(target) = self.rename_target(&doc, offset)? else {
+        let offset = adapters::offset_at(&document, position);
+        if document.syntax.is_in_comment_or_string(offset) {
+            return None;
+        }
+        let semantics = self.semantics(uri).await?;
+        let (subject, range) = Self::subject_at(&semantics, &document, offset)?;
+        Some((document, semantics, subject, range))
+    }
+
+    /// The locations that a subject covers in the workspace.
+    async fn subject_locations(
+        &self,
+        document: &Document,
+        semantics: &Semantics,
+        subject: &Subject,
+        declarations: bool,
+    ) -> Vec<Location> {
+        let uri = &document.uri;
+        let documents = match subject {
+            Subject::Global(_) => self.workspace_semantics().await,
+            Subject::Local(_) | Subject::Alias { .. } => self
+                .semantics(uri)
+                .await
+                .map(|found| vec![(uri.clone(), found)])
+                .unwrap_or_default(),
+        };
+        let mut locations = Vec::new();
+        for (document_uri, found) in &documents {
+            let Some(entry) = found.entry() else {
+                continue;
+            };
+            for (range, _) in covered(found, subject, declarations) {
+                locations.push(Location {
+                    uri: document_uri.clone(),
+                    range: lsp_range(&entry.source, range),
+                });
+            }
+        }
+        if declarations {
+            match subject {
+                Subject::Global(identity) => {
+                    locations.extend(self.location(uri, semantics, identity));
+                }
+                Subject::Alias { alias, .. } => {
+                    locations.extend(alias_declarations(document, alias).into_iter().map(
+                        |range| Location {
+                            uri: uri.clone(),
+                            range: adapters::range(document, range),
+                        },
+                    ));
+                }
+                Subject::Local(_) => {}
+            }
+        }
+        sort_and_deduplicate(&mut locations);
+        locations
+    }
+
+    pub(in crate::server) async fn handle_references(
+        &self,
+        params: ReferenceParams,
+    ) -> Result<Option<Vec<Location>>> {
+        let td = params.text_document_position;
+        let _workspace_read = self
+            .workspace_read_with_prelude(Some(&td.text_document.uri))
+            .await;
+        let Some((document, semantics, subject, _)) =
+            self.subject(&td.text_document.uri, td.position).await
+        else {
             return Ok(None);
         };
-        let placeholder = match target.kind {
-            RenameKind::Symbol { name, .. } => name,
-            RenameKind::Alias(_) | RenameKind::Binding(_) => {
-                doc.text[target.range.start..target.range.end].to_owned()
-            }
+        let locations = self
+            .subject_locations(
+                &document,
+                &semantics,
+                &subject,
+                params.context.include_declaration,
+            )
+            .await;
+        Ok(Some(locations))
+    }
+
+    pub(in crate::server) async fn handle_document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> Result<Option<Vec<DocumentHighlight>>> {
+        let td = params.text_document_position_params;
+        let _workspace_read = self.document_read_with_prelude(&td.text_document.uri).await;
+        let Some((document, semantics, subject, _)) =
+            self.subject(&td.text_document.uri, td.position).await
+        else {
+            return Ok(None);
         };
-        Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
-            range: adapters::range(&doc, target.range),
-            placeholder,
-        }))
+        let mut ranges: Vec<TextRange> = covered(&semantics, &subject, true)
+            .into_iter()
+            .map(|(range, _)| range)
+            .collect();
+        if let Subject::Alias { alias, .. } = &subject {
+            ranges.extend(alias_declarations(&document, alias));
+        }
+        ranges.sort_by_key(|range| (range.start, range.end));
+        let highlights = ranges
+            .into_iter()
+            .map(|range| DocumentHighlight {
+                range: adapters::range(&document, range),
+                kind: Some(DocumentHighlightKind::TEXT),
+            })
+            .collect();
+        Ok(Some(highlights))
     }
 
     pub(in crate::server) async fn handle_code_lens(
         &self,
         params: CodeLensParams,
     ) -> Result<Option<Vec<CodeLens>>> {
-        let _workspace_read = self.document_read(&params.text_document.uri).await;
-        let Some(doc) = self.document(&params.text_document.uri) else {
+        let uri = params.text_document.uri;
+        let _workspace_read = self.document_read_with_prelude(&uri).await;
+        let Some(document) = self.document(&uri) else {
             return Ok(None);
         };
-        if !Self::supported(&doc) {
+        if !Self::supported(&document) {
             return Ok(None);
         }
+        let Some(semantics) = self.semantics(&uri).await else {
+            return Ok(None);
+        };
+        let Some(entry) = semantics.entry() else {
+            return Ok(Some(Vec::new()));
+        };
         let mut lenses = Vec::new();
-        for symbol in doc
-            .syntax
-            .symbols()
-            .iter()
-            .filter(|symbol| symbol.kind == analysis::SymbolKind::Function)
-        {
-            let detail = &doc.text[symbol.detail_range.start..symbol.detail_range.end];
-            if detail.starts_with("law ") {
+        for declaration in semantics.declarations_in(&entry.path) {
+            if declaration.kind != DeclarationKind::Def {
                 continue;
             }
-            let locations: Vec<Location> = doc
-                .syntax
-                .references(symbol.id)
-                .filter(|reference| reference.kind != analysis::ReferenceKind::Declaration)
-                .map(|reference| Location {
-                    uri: doc.uri.clone(),
-                    range: adapters::range(&doc, reference.range),
+            let subject = Subject::Global(declaration.identity.clone());
+            let locations: Vec<Location> = covered(&semantics, &subject, false)
+                .into_iter()
+                .map(|(range, _)| Location {
+                    uri: uri.clone(),
+                    range: adapters::range(&document, range),
                 })
                 .collect();
             if locations.is_empty() {
                 continue;
             }
             let count = locations.len();
-            let selection_range = adapters::range(&doc, symbol.name_range);
-            let selection_start = selection_range.start;
+            let selection_range = adapters::range(&document, declaration.range);
             lenses.push(CodeLens {
                 range: selection_range,
                 command: Some(tower_lsp::lsp_types::Command {
                     title: format!("{count} reference{}", if count == 1 { "" } else { "s" }),
                     command: "editor.action.showReferences".into(),
                     arguments: Some(vec![
-                        serde_json::json!(doc.uri.as_str()),
-                        serde_json::json!(selection_start),
+                        serde_json::json!(uri.as_str()),
+                        serde_json::json!(selection_range.start),
                         serde_json::json!(locations),
                     ]),
                 }),
@@ -285,134 +326,173 @@ impl Backend {
         Ok(Some(lenses))
     }
 
-    pub(in crate::server) async fn handle_references(
-        &self,
-        params: ReferenceParams,
-    ) -> Result<Option<Vec<Location>>> {
-        let _workspace_read = self.workspace_ready_read().await;
-        let td = params.text_document_position;
-        let Some(doc) = self.cached_document(&td.text_document.uri) else {
-            return Ok(None);
-        };
-        if !Self::supported(&doc) {
-            return Ok(None);
-        }
-        let offset = adapters::offset_at(&doc, td.position);
-        if let Some(symbol) = binding_at(&doc, offset) {
-            return Ok(Some(
-                binding_ranges(&doc, symbol, params.context.include_declaration)
-                    .into_iter()
-                    .map(|range| Location {
-                        uri: doc.uri.clone(),
-                        range: adapters::range(&doc, range),
-                    })
-                    .collect(),
+    fn rename_refusal(document: &Document, offset: usize) -> Result<()> {
+        if analysis::imports(document)
+            .iter()
+            .any(|import| import.path.start <= offset && offset <= import.path.end)
+        {
+            return Err(invalid(
+                "Import paths cannot be renamed with Rename Symbol; rename the file or folder in the project tree instead",
             ));
         }
-        let Some(token) = declaration_token_at(&doc, offset) else {
-            return Ok(None);
-        };
-        let (target_uri, target_text, name) = self.symbol_source(&doc, &token);
-        if analysis::declaration_range(&target_text, &name).is_none() {
-            return Ok(None);
-        }
-        Ok(Some(self.symbol_references(
-            &target_uri,
-            &name,
-            params.context.include_declaration,
-        )))
+        Ok(())
     }
 
-    pub(in crate::server) async fn handle_document_highlight(
+    pub(in crate::server) async fn handle_prepare_rename(
         &self,
-        params: DocumentHighlightParams,
-    ) -> Result<Option<Vec<DocumentHighlight>>> {
-        let _workspace_read = self
-            .document_read(&params.text_document_position_params.text_document.uri)
-            .await;
-        let td = params.text_document_position_params;
-        let Some(doc) = self.document(&td.text_document.uri) else {
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let _workspace_read = self.workspace_read_with_prelude(Some(&uri)).await;
+        let Some(document) = self.document(&uri) else {
             return Ok(None);
         };
-        if !Self::supported(&doc) {
-            return Ok(None);
-        }
-        let offset = adapters::offset_at(&doc, td.position);
-        if let Some(symbol) = binding_at(&doc, offset) {
-            return Ok(Some(
-                binding_ranges(&doc, symbol, true)
-                    .into_iter()
-                    .map(|range| DocumentHighlight {
-                        range: adapters::range(&doc, range),
-                        kind: Some(DocumentHighlightKind::TEXT),
-                    })
-                    .collect(),
-            ));
-        }
-        let Some(token) = declaration_token_at(&doc, offset) else {
+        Self::rename_refusal(&document, adapters::offset_at(&document, params.position))?;
+        let Some((document, _, _, range)) = self.subject(&uri, params.position).await else {
             return Ok(None);
         };
-        let (target_uri, target_text, name) = self.symbol_source(&doc, &token);
-        if analysis::declaration_range(&target_text, &name).is_none() {
-            return Ok(None);
-        }
-        Ok(Some(
-            self.symbol_references(&target_uri, &name, true)
-                .into_iter()
-                .filter(|location| location.uri == doc.uri)
-                .map(|location| DocumentHighlight {
-                    range: location.range,
-                    kind: Some(DocumentHighlightKind::TEXT),
-                })
-                .collect(),
-        ))
+        Ok(Some(PrepareRenameResponse::RangeWithPlaceholder {
+            range: adapters::range(&document, range),
+            placeholder: document.text[range.start..range.end].to_owned(),
+        }))
     }
 
     pub(in crate::server) async fn handle_rename(
         &self,
         params: RenameParams,
     ) -> Result<Option<WorkspaceEdit>> {
-        let _workspace_read = self.workspace_ready_read().await;
         let td = params.text_document_position;
-        let Some(doc) = self.document(&td.text_document.uri) else {
+        let uri = td.text_document.uri;
+        let _workspace_read = self.workspace_read_with_prelude(Some(&uri)).await;
+        let Some(document) = self.document(&uri) else {
             return Ok(None);
         };
-        if !Self::supported(&doc) {
-            return Ok(None);
-        }
-        let offset = adapters::offset_at(&doc, td.position);
-        let Some(target) = self.rename_target(&doc, offset)? else {
+        Self::rename_refusal(&document, adapters::offset_at(&document, td.position))?;
+        let Some((_, semantics, subject, _)) = self.subject(&uri, td.position).await else {
             return Ok(None);
         };
-        if let RenameKind::Alias(import) = target.kind {
-            return rename_alias(&doc, import, &params.new_name).map(Some);
+        let new_name = params.new_name;
+        let dotted = matches!(subject, Subject::Global(_));
+        if !is_name(&new_name, dotted) {
+            return Err(invalid("The new name is not a valid Bend name"));
         }
-        if let RenameKind::Binding(symbol) = target.kind {
-            let edits = binding_ranges(&doc, symbol, true)
+        let documents = match &subject {
+            Subject::Global(_) => self.workspace_semantics().await,
+            Subject::Local(_) | Subject::Alias { .. } => vec![(uri.clone(), semantics.clone())],
+        };
+        let mut edits: HashMap<Url, Vec<TextRange>> = HashMap::new();
+        for (document_uri, found) in &documents {
+            for (range, implicit) in covered(found, &subject, true) {
+                if implicit {
+                    return Err(invalid(
+                        "This declaration is used through an operator or a do block, which a rename cannot edit",
+                    ));
+                }
+                edits.entry(document_uri.clone()).or_default().push(range);
+            }
+        }
+        if let Subject::Alias { alias, .. } = &subject {
+            edits
+                .entry(uri.clone())
+                .or_default()
+                .extend(alias_declarations(&document, alias));
+        }
+        if let Subject::Global(identity) = &subject {
+            let declared = file_uri(&identity.path);
+            if !declared
+                .is_some_and(|declared| documents.iter().any(|(found, _)| *found == declared))
+            {
+                return Err(invalid(
+                    "This declaration is outside the workspace, so a rename cannot edit it",
+                ));
+            }
+        }
+        self.check_rename(&documents, &edits, &subject, &new_name)
+            .await?;
+        if matches!(subject, Subject::Alias { .. }) {
+            let mut ranges = edits.remove(&uri).unwrap_or_default();
+            ranges.sort_by_key(|range| (range.start, range.end));
+            let alias_edits = ranges
                 .into_iter()
                 .map(|range| TextEdit {
-                    range: adapters::range(&doc, range),
-                    new_text: params.new_name.clone(),
+                    range: adapters::range(&document, range),
+                    new_text: new_name.clone(),
                 })
                 .collect();
-            return Ok(Some(WorkspaceEdit {
-                changes: Some(HashMap::from([(doc.uri.clone(), edits)])),
-                ..Default::default()
-            }));
+            return Ok(Some(versioned_edit(&document, alias_edits)));
         }
-        let RenameKind::Symbol { uri, name } = target.kind else {
-            return Ok(None);
-        };
-        let mut changes = HashMap::<Url, Vec<TextEdit>>::new();
-        for location in self.symbol_references(&uri, &name, true) {
-            changes.entry(location.uri).or_default().push(TextEdit {
-                range: location.range,
-                new_text: params.new_name.clone(),
-            });
-        }
+        let changes = edits
+            .into_iter()
+            .filter_map(|(document_uri, ranges)| {
+                let found = documents.iter().find(|(found, _)| *found == document_uri)?;
+                let source = &found.1.entry()?.source;
+                let edits = ranges
+                    .into_iter()
+                    .map(|range| TextEdit {
+                        range: lsp_range(source, range),
+                        new_text: new_name.clone(),
+                    })
+                    .collect();
+                Some((document_uri, edits))
+            })
+            .collect();
         Ok(Some(WorkspaceEdit {
             changes: Some(changes),
             ..Default::default()
         }))
+    }
+
+    /// Load each document again with the rename applied, and refuse it unless
+    /// every name keeps its meaning: the renamed ones name the renamed
+    /// declaration, and the others name what they named before.
+    async fn check_rename(
+        &self,
+        documents: &[(Url, Arc<Semantics>)],
+        edits: &HashMap<Url, Vec<TextRange>>,
+        subject: &Subject,
+        new_name: &str,
+    ) -> Result<()> {
+        let mut replaced: HashMap<PathBuf, String> = HashMap::new();
+        for (document_uri, ranges) in edits {
+            let Some((_, found)) = documents.iter().find(|(found, _)| found == document_uri) else {
+                continue;
+            };
+            let (Some(entry), Some(path)) = (found.entry(), self.entry_path(document_uri)) else {
+                continue;
+            };
+            let mut ranges = ranges.clone();
+            ranges.sort_by_key(|range| std::cmp::Reverse(range.start));
+            ranges.dedup();
+            let mut text = entry.source.clone();
+            for range in ranges {
+                text.replace_range(range.start..range.end, new_name);
+            }
+            replaced.insert(path, text);
+        }
+        let uris = documents.iter().map(|(found, _)| found.clone()).collect();
+        let Some(after) = self.semantics_edited(uris, replaced).await else {
+            return Err(invalid("The rename could not be checked"));
+        };
+        let renamed = |reading: Reading| match (reading, subject) {
+            (Reading::Global(identity), Subject::Global(old)) if identity == *old => {
+                Reading::Global(Identity {
+                    name: new_name.to_owned(),
+                    ..identity
+                })
+            }
+            (other, _) => other,
+        };
+        for ((_, before), (_, after)) in documents.iter().zip(&after) {
+            let old: Vec<Reading> = readings(before).into_iter().map(renamed).collect();
+            let new: Vec<Reading> = readings(after);
+            let same_error = before.error.as_ref().map(|error| &error.message)
+                == after.error.as_ref().map(|error| &error.message);
+            if old != new || !same_error {
+                return Err(invalid(
+                    "The rename would change what other names refer to, or stop a file from loading",
+                ));
+            }
+        }
+        Ok(())
     }
 }

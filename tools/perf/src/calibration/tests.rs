@@ -23,11 +23,11 @@ fn fresh_summary(counts: [Value; 3]) -> Value {
             )
         })
         .collect();
-    json!({"function_name": "inlay_hints_warm", "id": "small", "baselines": ["fresh123", "fresh123"], "kind": "LibraryBenchmark", "benchmark_exe": EXECUTABLE, "profiles": [{"tool": "Callgrind", "summaries": {"parts": [{"metrics_summary": {"Callgrind": metrics}}]}}]})
+    json!({"function_name": "document_symbols_warm", "id": "small", "baselines": ["fresh123", "fresh123"], "kind": "LibraryBenchmark", "benchmark_exe": EXECUTABLE, "profiles": [{"tool": "Callgrind", "summaries": {"parts": [{"metrics_summary": {"Callgrind": metrics}}]}}]})
 }
 
 fn expected() -> BTreeSet<Identity> {
-    BTreeSet::from([("inlay_hints_warm".to_owned(), Some("small".to_owned()))])
+    BTreeSet::from([("document_symbols_warm".to_owned(), Some("small".to_owned()))])
 }
 
 fn measured(summaries: &[Value], expected: &BTreeSet<Identity>) -> ToolResult<Vec<Value>> {
@@ -53,7 +53,7 @@ fn zero_is_a_real_count_not_a_missing_measurement() -> ToolResult<()> {
             &expected()
         )?,
         vec![
-            json!({"function_name": "inlay_hints_warm", "id": "small", "counts": {"Ir": 0, "I1mr": 0, "ILmr": 0}})
+            json!({"function_name": "document_symbols_warm", "id": "small", "counts": {"Ir": 0, "I1mr": 0, "ILmr": 0}})
         ]
     );
     Ok(())
@@ -93,7 +93,10 @@ fn missing_duplicate_and_extra_workloads_are_rejected() -> ToolResult<()> {
     extra["id"] = json!("unexpected");
     assert_error(measured(&[extra], &expected()), "duplicate or unexpected")?;
     let mut ids = expected();
-    ids.insert(("inlay_hints_warm".to_owned(), Some("medium".to_owned())));
+    ids.insert((
+        "document_symbols_warm".to_owned(),
+        Some("medium".to_owned()),
+    ));
     assert_error(measured(&[summary], &ids), "missing workloads")
 }
 
@@ -104,7 +107,7 @@ fn null_workload_id_is_distinct_from_named_id() -> ToolResult<()> {
     assert_eq!(
         measured(
             &[summary.clone()],
-            &BTreeSet::from([("inlay_hints_warm".to_owned(), None)])
+            &BTreeSet::from([("document_symbols_warm".to_owned(), None)])
         )?[0]["id"],
         Value::Null
     );
@@ -243,7 +246,7 @@ fn unretained_ambiguous_small_or_unsupported_symbols_fail() {
 fn collected_probe_and_malformed_profiles_fail() -> ToolResult<()> {
     let header = "# callgrind format\nversion: 1\nevents: Ir I1mr ILmr\n";
     check_probe_absent(&format!(
-        "{header}fn=(1) analysis::inlay_hints_warm\n1 100 2 3\n"
+        "{header}fn=(1) analysis::document_symbols_warm\n1 100 2 3\n"
     ))?;
     for text in [
         format!("{header}fn=(2) analysis::{PROBE}\n1 1 0 0\n"),
@@ -261,11 +264,11 @@ fn collected_probe_and_malformed_profiles_fail() -> ToolResult<()> {
 fn exact_known_anchors_reject_harness_drift_and_ambiguity() -> ToolResult<()> {
     let harness = include_str!("../../../../benches/analysis.rs");
     let alterations = [
-        harness.replace("fn inlay_hints_warm(", "fn renamed_inlay_hints_warm("),
         harness.replace(
-            "identifier_name: \"transform_31\"",
-            "identifier_name: \"different\"",
+            "fn document_symbols_warm(",
+            "fn renamed_document_symbols_warm(",
         ),
+        harness.replace("snapshot: &SMALL_SNAPSHOT,", "snapshot: &MEDIUM_SNAPSHOT,"),
         harness.replace("fn medium() -> Self", "fn medium_changed() -> Self"),
         harness.replace("fn large() -> Self", "fn large_changed() -> Self"),
         format!("{harness}{harness}"),
@@ -435,7 +438,9 @@ fn snapshot_rejects_symlinks_to_mutable_external_inputs() -> ToolResult<()> {
 #[test]
 fn executed_workload_manifest_rejects_incomplete_or_duplicate_list() -> ToolResult<()> {
     let lines: Vec<_> = ["small", "medium", "large"]
-        .map(|size| format!("analysis::analysis_hot_paths::inlay_hints_warm::{size}: benchmark"))
+        .map(|size| {
+            format!("analysis::analysis_hot_paths::document_symbols_warm::{size}: benchmark")
+        })
         .into_iter()
         .collect();
     let valid = format!("{}\n\n0 tests, 3 benchmarks", lines.join("\n"));
