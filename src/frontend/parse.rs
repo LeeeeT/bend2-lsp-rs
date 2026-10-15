@@ -161,10 +161,12 @@ impl Parse<'_> {
 
     fn record(&mut self, span: Option<Span>, event: Event, implicit: bool) {
         if let Some(span) = span {
+            let tld = self.tlds.len().saturating_sub(1);
             self.events.push(Recorded {
                 span,
                 event,
                 implicit,
+                tld,
             });
         }
     }

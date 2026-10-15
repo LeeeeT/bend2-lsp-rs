@@ -36,6 +36,8 @@ pub struct Occurrence {
     pub meaning: Meaning,
     /// The occurrence has no name of its own at this span.
     pub implicit: bool,
+    /// The declaration that holds it: its index in the load's declarations.
+    pub tld: usize,
 }
 
 /// A meaning that the parser has not settled yet.
@@ -59,6 +61,7 @@ pub(super) struct Recorded {
     pub span: Span,
     pub event: Event,
     pub implicit: bool,
+    pub tld: usize,
 }
 
 /// The occurrences of the declarations that parsed completely. An unsettled
@@ -77,6 +80,7 @@ pub(super) fn settle(recorded: Vec<Recorded>) -> Vec<Occurrence> {
                 span: record.span,
                 meaning,
                 implicit: record.implicit,
+                tld: record.tld,
             })
         })
         .collect()
