@@ -1,0 +1,16 @@
+[package]
+name = "bend2-oracle"
+version = "0.6.1"
+edition.workspace = true
+rust-version.workspace = true
+publish = false
+license = "Apache-2.0"
+description = "Traces of the Bend 2 front end port, for comparison with the compiler's own parser"
+repository = "https://github.com/IlyaGulya/bend2-lsp-rs"
+
+[dependencies]
+bend2-lsp = { path = "../.." }
+sha2 = "0.10"
+
+[lints]
+workspace = true

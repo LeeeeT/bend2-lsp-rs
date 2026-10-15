@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = [".", "tools/perf", "vendor/tower-lsp"]
+members = [".", "tools/oracle", "tools/perf", "vendor/tower-lsp"]
 default-members = ["."]
 
 [workspace.package]
