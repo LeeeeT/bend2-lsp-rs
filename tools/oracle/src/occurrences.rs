@@ -240,19 +240,39 @@ fn tokens(text: &[u16]) -> Vec<Span> {
 /// The problems of one load: each occurrence that its terms do not justify,
 /// and each identifier token with no occurrence.
 pub fn count(loaded: &Load) -> (usize, usize) {
-    let occurrences = loaded.files.iter().map(|file| file.occurrences.len()).sum();
-    let tokens = loaded
+    let entry = loaded
         .files
-        .iter()
-        .map(|file| tokens(&file.parsed).len())
-        .sum();
+        .last()
+        .filter(|file| file.ns.is_empty() && loaded.error.is_none());
+    let occurrences = entry.map_or(0, |file| file.occurrences.len());
+    let tokens = entry.map_or(0, |file| tokens(&file.parsed).len());
     (occurrences, tokens)
 }
 
 pub fn check(loaded: &Load) -> Vec<String> {
-    let nodes: Vec<Nodes> = loaded.tlds.iter().map(Nodes::of).collect();
+    let entry_tlds = loaded
+        .tlds
+        .iter()
+        .rev()
+        .take_while(|tld| tld.file.is_empty())
+        .count();
+    let first = loaded.tlds.len() - entry_tlds;
+    let nodes: HashMap<usize, Nodes> = (first..loaded.tlds.len())
+        .map(|index| (index, Nodes::of(&loaded.tlds[index])))
+        .collect();
+    let mut all = Nodes::default();
+    for n in nodes.values() {
+        all.named.extend(n.named.iter().cloned());
+        all.keys.extend(n.keys.iter().cloned());
+        all.arms.extend(n.arms.iter().cloned());
+        all.declared.extend(n.declared.iter().cloned());
+    }
     let mut problems = Vec::new();
-    for file in &loaded.files {
+    let entry = loaded
+        .files
+        .last()
+        .filter(|file| file.ns.is_empty() && loaded.error.is_none());
+    if let Some(file) = entry {
         let text = |span: Span| String::from_utf16_lossy(&file.parsed[span.beg..span.end]);
         let mut covered: HashMap<(usize, usize), usize> = HashMap::new();
         for occurrence in &file.occurrences {
@@ -261,21 +281,35 @@ pub fn check(loaded: &Load) -> Vec<String> {
                 *covered.entry((span.beg, span.end)).or_default() += 1;
             }
             let ok = match &occurrence.meaning {
-                Meaning::Local(binder) => nodes
-                    .get(binder.tld)
-                    .is_some_and(|n| n.locals.contains(&(span.beg, span.end, binder.index))),
-                Meaning::Binder(binder) => nodes
-                    .get(binder.tld)
-                    .is_some_and(|n| n.binders.contains(&(binder.index, text(span)))),
-                Meaning::Global { key } if occurrence.implicit => {
-                    nodes.iter().any(|n| n.keys.contains(key))
+                Meaning::Local(binder) => {
+                    let found = nodes
+                        .get(&binder.tld)
+                        .is_some_and(|n| n.locals.contains(&(span.beg, span.end, binder.index)));
+                    let named = nodes
+                        .get(&binder.tld)
+                        .is_some_and(|n| n.binders.contains(&(binder.index, text(span))));
+                    if !found && named {
+                        problems.push(format!(
+                            "unverified: {}: '{}' at {}..{}: {:?} has no variable node",
+                            file.real,
+                            text(span),
+                            span.beg,
+                            span.end,
+                            occurrence.meaning
+                        ));
+                    }
+                    found || named
                 }
-                Meaning::Global { key } => nodes.iter().any(|n| {
-                    n.named.contains(&(span.beg, key.clone()))
-                        || n.arms.contains(key)
-                        || n.declared.contains(key)
-                }),
-                Meaning::Declaration { key, .. } => nodes.iter().any(|n| n.declared.contains(key)),
+                Meaning::Binder(binder) => nodes
+                    .get(&binder.tld)
+                    .is_some_and(|n| n.binders.contains(&(binder.index, text(span)))),
+                Meaning::Global { key } if occurrence.implicit => all.keys.contains(key),
+                Meaning::Global { key } => {
+                    all.named.contains(&(span.beg, key.clone()))
+                        || all.arms.contains(key)
+                        || loaded.book.declares(key)
+                }
+                Meaning::Declaration { key, .. } => all.declared.contains(key),
             };
             if !ok {
                 problems.push(format!(
@@ -290,9 +324,19 @@ pub fn check(loaded: &Load) -> Vec<String> {
         }
         if loaded.error.is_none() {
             for token in tokens(&file.parsed) {
+                let marked = token
+                    .beg
+                    .checked_sub(1)
+                    .and_then(|index| file.parsed.get(index))
+                    == Some(&u16::from(b'+'));
                 if !covered.contains_key(&(token.beg, token.end)) {
+                    let why = if marked {
+                        "is a +name in term position, which the compiler leaves unbound"
+                    } else {
+                        "has no occurrence"
+                    };
                     problems.push(format!(
-                        "{}: '{}' at {}..{} has no occurrence",
+                        "{}: '{}' at {}..{} {why}",
                         file.real,
                         text(token),
                         token.beg,

@@ -92,13 +92,31 @@ fn main() -> io::Result<()> {
     };
     let dump = std::env::args().any(|arg| arg == "--dump");
     let check = std::env::args().any(|arg| arg == "--occurrences");
+    let timed = std::env::args().any(|arg| arg == "--load");
     let mut output = io::stdout().lock();
     for entry in io::stdin().lock().lines() {
         let entry = entry?;
         if entry.is_empty() {
             continue;
         }
+        let start = std::time::Instant::now();
         let loaded = load(&Disk, &env, &entry);
+        if timed {
+            let files = loaded.files.len();
+            let elapsed = start.elapsed().as_micros();
+            let (found, tokens) = occurrences::count(&loaded);
+            let parsed = loaded
+                .files
+                .iter()
+                .filter(|file| file.ns.is_empty())
+                .map(|file| file.parsed.len())
+                .collect::<Vec<_>>();
+            writeln!(
+                output,
+                "{entry}: {files} files, {elapsed} us, parsed {parsed:?}, {found} occurrences, {tokens} tokens"
+            )?;
+            continue;
+        }
         if check {
             let (found, tokens) = occurrences::count(&loaded);
             eprintln!("{entry}: {found} occurrences, {tokens} tokens");
