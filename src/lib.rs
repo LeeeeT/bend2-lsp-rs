@@ -1,5 +1,6 @@
 pub mod analysis;
 pub mod frontend;
+pub mod highlight;
 pub mod semantic;
 mod server;
 pub mod workspace;

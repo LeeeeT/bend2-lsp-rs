@@ -10,7 +10,9 @@ use std::{
 
 use crate::{
     analysis::TextRange,
-    frontend::{self, Binder, Book, ErrorText, Load, LoadedFile, Meaning, Span, Term, TraceKind},
+    frontend::{
+        self, Binder, Book, ErrorText, Load, LoadedFile, Meaning, Span, Term, TldTrace, TraceKind,
+    },
 };
 
 /// A declaration's identity: the file that declares it, its name there, and
@@ -48,6 +50,33 @@ pub struct Declaration {
     pub detail: String,
     /// For a def or a law, how many of its parameters are `~` templates.
     pub templates: usize,
+    /// A def or a law whose result is a universe, as `def IO(-A: Type) ->
+    /// Type` or `law File: Type`: its values are types.
+    pub type_former: bool,
+}
+
+/// The term is a universe, or a function whose final result is a universe.
+fn universe_valued(term: &Term) -> bool {
+    match term {
+        Term::All { b, .. } => universe_valued(b),
+        Term::Typ { .. } | Term::Qnt { .. } => true,
+        _ => false,
+    }
+}
+
+/// The def or law gives types. A def that fills a law has no type of its own,
+/// so it takes the type of the law.
+fn type_former(load: &Load, tld: &TldTrace) -> bool {
+    let law = || {
+        load.tlds
+            .iter()
+            .find(|other| other.kind == TraceKind::Law && other.name == tld.name)
+    };
+    tld.ret
+        .as_ref()
+        .or(tld.t.as_ref())
+        .or_else(|| law().and_then(|law| law.t.as_ref()))
+        .is_some_and(universe_valued)
 }
 
 /// One name of a file and what it means.
@@ -325,6 +354,8 @@ impl Semantics {
                 parameters,
                 detail,
                 templates: load.book.def(key).map_or(0, |def| def.x),
+                type_former: !ctr
+                    && tld.is_some_and(|tld| tld.kind != TraceKind::Type && type_former(load, tld)),
             });
         }
     }

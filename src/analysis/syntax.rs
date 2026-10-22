@@ -22,6 +22,8 @@ const KEYWORDS: &[&str] = &[
     "as",
 ];
 
+const UNIVERSES: &[&str] = &["Type", "Data", "Kind", "Quant"];
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct TokenId(pub usize);
 
@@ -340,10 +342,10 @@ impl NameTable {
     }
 }
 
-fn keyword_name_flags(source: &str, names: &NameTable) -> Vec<bool> {
+fn name_flags(source: &str, names: &NameTable, words: &[&str]) -> Vec<bool> {
     let mut flags = vec![false; names.ranges.len()];
-    for keyword in KEYWORDS {
-        if let Some(name) = names.find(source, keyword) {
+    for word in words {
+        if let Some(name) = names.find(source, word) {
             flags[name.0] = true;
         }
     }
@@ -355,6 +357,7 @@ pub struct SyntaxIndex {
     tokens: Box<[Token]>,
     names: NameTable,
     keyword_names: Box<[bool]>,
+    universe_names: Box<[bool]>,
     imports: Box<[IndexedImport]>,
     symbols: Box<[IndexedSymbol]>,
     references: Box<[Reference]>,
@@ -400,7 +403,8 @@ impl SyntaxIndex {
             delimiter_context,
             ..
         } = scan;
-        let keyword_names = keyword_name_flags(source, &names);
+        let keyword_names = name_flags(source, &names, KEYWORDS);
+        let universe_names = name_flags(source, &names, UNIVERSES);
         let mut symbols = parse_symbols(source, &lines, &mut names);
         for (index, symbol) in symbols.iter_mut().enumerate() {
             symbol.id = SymbolId(index);
@@ -436,6 +440,7 @@ impl SyntaxIndex {
             names,
             imports: parse_imports(source, &lines).into_boxed_slice(),
             keyword_names: keyword_names.into_boxed_slice(),
+            universe_names: universe_names.into_boxed_slice(),
             symbols: symbols.into_boxed_slice(),
             references: references.references.into_boxed_slice(),
             token_references: references.token_references.into_boxed_slice(),
@@ -535,6 +540,12 @@ impl SyntaxIndex {
     #[must_use]
     pub fn is_keyword(&self, name: NameId) -> bool {
         self.keyword_names.get(name.0).copied().unwrap_or(false)
+    }
+
+    /// The name is a universe: `Type`, `Data`, `Kind` or `Quant`.
+    #[must_use]
+    pub fn is_universe(&self, name: NameId) -> bool {
+        self.universe_names.get(name.0).copied().unwrap_or(false)
     }
 
     #[must_use]

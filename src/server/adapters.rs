@@ -1,9 +1,12 @@
-use crate::analysis::{self, CompletionKind, DocumentSnapshot, SymbolKind, TextRange};
+use crate::{
+    analysis::{self, CompletionKind, DocumentSnapshot, SymbolKind, TextRange},
+    highlight::{Class, Highlight},
+};
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, CompletionTextEdit, DocumentSymbol, FoldingRange,
     FoldingRangeKind, Location, ParameterInformation, ParameterLabel, Position, Range,
-    SelectionRange, SemanticToken, SignatureHelp, SignatureInformation, SymbolInformation,
-    TextEdit,
+    SelectionRange, SemanticToken, SemanticTokenType, SignatureHelp, SignatureInformation,
+    SymbolInformation, TextEdit,
 };
 use url::Url;
 
@@ -256,9 +259,28 @@ pub(super) fn selection_range(
     }
 }
 
+/// The token type of each class, in the order of the legend.
+pub(super) fn semantic_token_types() -> Vec<SemanticTokenType> {
+    Class::ALL
+        .into_iter()
+        .map(|class| match class {
+            Class::Keyword => SemanticTokenType::KEYWORD,
+            Class::Comment => SemanticTokenType::COMMENT,
+            Class::String => SemanticTokenType::STRING,
+            Class::Number => SemanticTokenType::NUMBER,
+            Class::Operator => SemanticTokenType::OPERATOR,
+            Class::Namespace => SemanticTokenType::NAMESPACE,
+            Class::Variable => SemanticTokenType::VARIABLE,
+            Class::Function => SemanticTokenType::FUNCTION,
+            Class::Type => SemanticTokenType::TYPE,
+            Class::Constructor => SemanticTokenType::ENUM_MEMBER,
+        })
+        .collect()
+}
+
 pub(super) fn semantic_tokens(
     snapshot: &DocumentSnapshot,
-    tokens: Vec<analysis::SemanticToken>,
+    tokens: Vec<Highlight>,
 ) -> Vec<SemanticToken> {
     let mut result = Vec::with_capacity(tokens.len());
     let mut previous_line = 0;
@@ -277,7 +299,7 @@ pub(super) fn semantic_tokens(
                 start.character
             },
             length: end.character - start.character,
-            token_type: token.token_type,
+            token_type: token.class as u32,
             token_modifiers_bitset: 0,
         });
         previous_line = start.line;

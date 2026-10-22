@@ -10,9 +10,20 @@
   spaces or non-ASCII characters.
 - Resolve local imports during enhanced Windows checks, including transitive
   imports, and keep related errors linked to the original declarations.
+- Send the universes `Type`, `Data`, `Kind` and `Quant` as type semantic tokens.
+  Before, they had no semantic token.
+- Send a def or a law whose result is a universe, as `def IO(-A: Type) -> Type`
+  or `law File: Type`, as a type semantic token. Before, it was a function.
+- Send the path of an import as one string semantic token, and the alias of an
+  import as a namespace semantic token. Before, the path was a series of
+  operators and numbers, and the alias had no semantic token.
 
 ### Under the hood
 
+- Classify the tokens of a document in the public `highlight` module, so that
+  other programs highlight Bend code as the semantic tokens do. Each highlight
+  also tells whether its token declares a name. The semantic token legend now
+  has only the ten token types that the server sends.
 - Require genuine compiler diagnostics in all six native and installed-executable
   E2E matrices. Pin official Unix archives and build the Windows compiler from
   exact upstream source with a pinned native Bun runtime and a resource-locator

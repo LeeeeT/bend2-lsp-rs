@@ -254,12 +254,6 @@ pub struct SelectionRange {
     pub parent: Option<Box<Self>>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct SemanticToken {
-    pub range: TextRange,
-    pub token_type: u32,
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SignatureHelp {
     pub label: String,
