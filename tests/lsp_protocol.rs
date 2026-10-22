@@ -339,7 +339,7 @@ mod protocol {
                 .next()
                 .is_some_and(|state| state != "Z" && state != "X");
         }
-        Command::new("/bin/kill")
+        Command::new("kill")
             .arg("-0")
             .arg(pid)
             .stdout(Stdio::null())
@@ -4396,7 +4396,7 @@ mod protocol {
         ));
         let still_running = process_is_running(&pid);
         if still_running {
-            let _ = Command::new("/bin/kill")
+            let _ = Command::new("kill")
                 .arg(&pid)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -4699,7 +4699,7 @@ mod protocol {
             }
         }
         if still_running {
-            let _ = Command::new("/bin/kill")
+            let _ = Command::new("kill")
                 .arg(&pid)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -4837,7 +4837,7 @@ mod protocol {
         assert!(status.success(), "SIGTERM is graceful shutdown: {status}");
         let still_running = process_is_running(&pid);
         if still_running {
-            let _ = Command::new("/bin/kill").arg(&pid).status();
+            let _ = Command::new("kill").arg(&pid).status();
         }
         assert!(!still_running, "SIGTERM must reap compiler child {pid}");
         let stderr = fs::read_to_string(&stderr_path).must_be("read captured server stderr");
@@ -4905,7 +4905,7 @@ mod protocol {
             client.try_wait().is_some(),
             "exit without shutdown must terminate while stdin remains open"
         );
-        let still_running = Command::new("/bin/kill")
+        let still_running = Command::new("kill")
             .arg("-0")
             .arg(&pid)
             .stdout(Stdio::null())
@@ -4913,7 +4913,7 @@ mod protocol {
             .status()
             .is_ok_and(|status| status.success());
         if still_running {
-            let _ = Command::new("/bin/kill")
+            let _ = Command::new("kill")
                 .arg(&pid)
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())

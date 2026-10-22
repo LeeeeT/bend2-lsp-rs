@@ -1497,7 +1497,7 @@ mod snapshot_lifetime_tests {
         let diagnostics = compiler_diagnostics(
             graph,
             CompilerConfig {
-                path: "/usr/bin/true".into(),
+                path: "true".into(),
                 arguments: Vec::new(),
             },
             CompilerBackend::Legacy,

@@ -155,7 +155,7 @@ impl LspClient {
     /// Panics if the operating system rejects the termination signal.
     #[cfg(unix)]
     pub fn sigterm(&self) {
-        let status = Command::new("/bin/kill")
+        let status = Command::new("kill")
             .arg("-TERM")
             .arg(self.process_id().to_string())
             .status()
