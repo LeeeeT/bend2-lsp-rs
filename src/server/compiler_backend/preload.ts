@@ -81,25 +81,21 @@ try {
   const source = readFileSync(process.argv[1], 'utf8');
   const fingerprint = createHash('sha256').update(source).digest('hex');
   const registry: unknown = JSON.parse(readFileSync(join(staging, 'registry.json'), 'utf8'));
-  if (!exactFields(registry, ['schema', 'families', 'compilers']) ||
-      registry.schema !== 2 ||
-      registry.families === null || typeof registry.families !== 'object' || Array.isArray(registry.families) ||
+  if (!exactFields(registry, ['schema', 'compilers']) ||
+      registry.schema !== 3 ||
       registry.compilers === null || typeof registry.compilers !== 'object' || Array.isArray(registry.compilers)) {
     throw new Error('Invalid compiler registry schema');
   }
   const compilers = registry.compilers as Record<string, unknown>; // Object shape proven above.
-  const families = registry.families as Record<string, unknown>; // Object shape proven above.
   const compiler = compilers[fingerprint];
-  if (!exactFields(compiler, ['version', 'family', 'targets']) &&
-      !exactFields(compiler, ['version', 'family', 'targets', 'runtime'])) {
+  if (!exactFields(compiler, ['version', 'targets', 'runtime'])) {
     throw new Error(`Unsupported embedded compiler fingerprint ${fingerprint}`);
   }
-  if (typeof compiler.version !== 'string' || typeof compiler.family !== 'string' ||
-      !Object.hasOwn(families, compiler.family) || !Array.isArray(compiler.targets) ||
+  if (typeof compiler.version !== 'string' || !Array.isArray(compiler.targets) ||
       compiler.targets.length === 0 || compiler.targets.some(target => typeof target !== 'string')) {
-    throw new Error('Invalid compiler family/schema in registry');
+    throw new Error('Invalid compiler schema in registry');
   }
-  const runtime = compiler.runtime ?? families[compiler.family];
+  const runtime = compiler.runtime;
   if (!exactFields(runtime, ['bun', 'revision']) || typeof runtime.bun !== 'string' || typeof runtime.revision !== 'string') {
     throw new Error('Invalid native runtime registry schema');
   }

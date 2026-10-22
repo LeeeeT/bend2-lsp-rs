@@ -1,4 +1,4 @@
-//! A port of the front end of the Bend compiler (`bend2/bend.ts`, v2.0.37):
+//! A port of the front end of the Bend compiler (`bend2/bend.ts`, v2.0.38):
 //! its loader, parser and body flattening. It resolves every name as the
 //! compiler does. `tools/oracle` checks it against the compiler itself.
 

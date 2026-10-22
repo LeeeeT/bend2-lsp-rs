@@ -10,7 +10,7 @@ use std::{
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 
 const FORMAT_VERSION: u32 = 1;
-const REGISTRY_SCHEMA: u32 = 2;
+const REGISTRY_SCHEMA: u32 = 3;
 
 static REGISTRY: LazyLock<Result<Registry, serde_json::Error>> =
     LazyLock::new(|| serde_json::from_str(include_str!("compiler_backend/registry.json")));
@@ -628,7 +628,6 @@ fn invalid(message: impl std::fmt::Display) -> io::Error {
 #[serde(deny_unknown_fields)]
 struct Registry {
     schema: u32,
-    families: HashMap<String, RuntimeIdentity>,
     compilers: HashMap<String, RegisteredCompiler>,
 }
 
@@ -636,9 +635,8 @@ struct Registry {
 #[serde(deny_unknown_fields)]
 struct RegisteredCompiler {
     version: String,
-    family: String,
     targets: Vec<String>,
-    runtime: Option<RuntimeIdentity>,
+    runtime: RuntimeIdentity,
 }
 
 fn validate_identity(identity: &CompilerIdentity) -> io::Result<()> {
@@ -651,12 +649,7 @@ fn validate_identity(identity: &CompilerIdentity) -> io::Result<()> {
         .get(&identity.fingerprint)
         .filter(|_| is_sha256(&identity.fingerprint))
         .ok_or_else(|| invalid("compiler fingerprint is not verified"))?;
-    let runtime = compiler
-        .runtime
-        .as_ref()
-        .or_else(|| registry.families.get(&compiler.family))
-        .ok_or_else(|| invalid("compiler registry has no runtime pin"))?;
-    if compiler.version != identity.version || *runtime != identity.runtime {
+    if compiler.version != identity.version || compiler.runtime != identity.runtime {
         return Err(invalid(
             "compiler version or embedded runtime differs from its verified pin",
         ));
@@ -680,17 +673,12 @@ mod tests {
         let (fingerprint, compiler) = registry
             .compilers
             .iter()
-            .find(|(_, compiler)| compiler.version == "2.0.36")
-            .ok_or_else(|| invalid("missing frozen compiler pin"))?;
-        let runtime = compiler
-            .runtime
-            .as_ref()
-            .or_else(|| registry.families.get(&compiler.family))
-            .ok_or_else(|| invalid("missing frozen runtime pin"))?;
+            .next()
+            .ok_or_else(|| invalid("missing compiler pin"))?;
         Ok(CompilerIdentity {
             version: compiler.version.clone(),
             fingerprint: fingerprint.clone(),
-            runtime: runtime.clone(),
+            runtime: compiler.runtime.clone(),
         })
     }
 
@@ -773,7 +761,7 @@ mod tests {
             ("/kind", json!("compatibility")),
             ("/compiler/fingerprint", json!("0".repeat(64))),
             ("/compiler/runtime/revision", json!("runtime-drift")),
-            ("/compiler/version", json!("2.0.35")),
+            ("/compiler/version", json!("2.0.37")),
             ("/sources/0/sha256", json!("f".repeat(64))),
             ("/sources/0/path", json!(fixture_path("/another/main.bend"))),
         ] {
@@ -1065,7 +1053,7 @@ mod tests {
             identity
         );
         for (pointer, replacement) in [
-            ("/compiler/runtime/bun", json!("1.4.0")),
+            ("/compiler/runtime/bun", json!("1.3.14")),
             ("/compiler/runtime/revision", json!("drift")),
             ("/compiler/fingerprint", json!("0".repeat(64))),
             ("/request_id", json!("other-probe")),

@@ -189,15 +189,10 @@ def probe_compiler_identity(output: Path, staging: Path, environment: dict) -> d
     return observed
 
 
-def install(destination: Path, target: str, version: str) -> Path:
+def install(destination: Path, target: str) -> Path:
     if destination.exists() or destination.is_symlink():
         raise ValueError(f"installation destination must not exist: {destination}")
-    if version == PINS["legacy"]["version"]:
-        pin = PINS["legacy"]
-        if target != pin["target"]:
-            raise ValueError("legacy Bend verification is macOS ARM64 only")
-        required = pin["files"]
-    elif target in PINS["archives"]:
+    if target in PINS["archives"]:
         pin = PINS["archives"][target]
         required = {**PINS["resources"], "bin/bend": pin["executable"]}
     else:
@@ -210,7 +205,7 @@ def install(destination: Path, target: str, version: str) -> Path:
             observed = probe_compiler_identity(executable, Path(temporary), compiler_environment())
         host = "darwin" if target.endswith("apple-darwin") else "linux"
         architecture = "arm64" if target.startswith("aarch64-") else "x64"
-        runtime = pin.get("runtime", PINS["bun"])
+        runtime = PINS["bun"]
         if (
             observed["host"] != f"{host}:{architecture}"
             or observed["bun"] != runtime["version"]
@@ -218,8 +213,8 @@ def install(destination: Path, target: str, version: str) -> Path:
         ):
             raise ValueError(f"unexpected official compiler embedded runtime: {observed}")
         identity = {
-            "bend_version": version,
-            "source_commit": pin.get("source_commit", PINS["source_commit"]),
+            "bend_version": PINS["version"],
+            "source_commit": PINS["source_commit"],
             "release_asset": pin["asset"],
             "archive_size": pin["size"],
             "archive_sha256": pin["sha256"],
@@ -241,7 +236,7 @@ def install(destination: Path, target: str, version: str) -> Path:
     except BaseException:
         shutil.rmtree(destination)
         raise
-    print(f"Installed official Bend {version} ({target}, {pin['sha256']}): {executable}")
+    print(f"Installed official Bend {PINS['version']} ({target}, {pin['sha256']}): {executable}")
     return executable
 
 
@@ -251,13 +246,12 @@ def main() -> None:
     # Explicit target comes from the workflow's verified native Rust host;
     # Python itself can otherwise be emulated on Windows ARM64.
     parser.add_argument("--target", choices=TARGETS)
-    parser.add_argument("--version", choices=(PINS["version"], PINS["legacy"]["version"]), default=PINS["version"])
     parser.add_argument("--github-env", type=Path)
     parser.add_argument("--github-output", type=Path)
     arguments = parser.parse_args()
     destination = arguments.destination.absolute()
     try:
-        executable = install(destination, arguments.target or native_target(), arguments.version)
+        executable = install(destination, arguments.target or native_target())
     finally:
         # A failed source build can retain evidence, but never becomes an
         # installation or contributes BEND2_COMPILER_TEST_PATH to later tests.

@@ -24,13 +24,11 @@ fn assert_unfilled_law_range(source: &str, expected_range: &Value) {
         .output()
         .must_be("probe real compiler");
     assert!(version.status.success());
-    assert!(
-        matches!(
-            String::from_utf8(version.stdout)
-                .must_be("compiler version UTF-8")
-                .trim(),
-            "bend 2.0.36" | "bend 2.0.37"
-        ),
+    assert_eq!(
+        String::from_utf8(version.stdout)
+            .must_be("compiler version UTF-8")
+            .trim(),
+        "bend 2.0.38",
         "use a genuine compiler from the E2E provisioning pins"
     );
 

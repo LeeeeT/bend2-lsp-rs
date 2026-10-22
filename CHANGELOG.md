@@ -2,9 +2,14 @@
 
 ## Unreleased
 
+### Breaking Changes
+
+- Give enhanced multi-error diagnostics only with Bend 2.0.38. Other versions,
+  including Bend 2.0.32–2.0.37, get the textual CLI diagnostics.
+
 ### Bug Fixes
 
-- Support enhanced multi-error diagnostics with verified Bend 2.0.37 builds.
+- Support enhanced multi-error diagnostics with verified Bend 2.0.38 builds.
   Preserve independent errors, original-cause links, and precise source ranges.
 - Keep enhanced compiler checks working when project and temporary paths contain
   spaces or non-ASCII characters.
@@ -28,7 +33,9 @@
 - Require genuine compiler diagnostics in all six native and installed-executable
   E2E matrices. Pin official Unix archives and build the Windows compiler from
   exact upstream source with a pinned native Bun runtime and a resource-locator
-  adjustment only. Retain macOS ARM64 Bend 2.0.36 compatibility coverage.
+  adjustment only.
+- Give each compiler of the identity registry its own runtime pin. The registry
+  (schema 3) has no runtime families.
 - Use native filesystem paths when loading compiler sources; keep Bend import
   namespaces slash-separated. Validate these loader adaptations against exact
   embedded-source anchors before applying any recovery patches.

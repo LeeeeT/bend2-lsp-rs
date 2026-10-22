@@ -90,7 +90,7 @@ unchanged.
 
 Every native target additionally runs `native_compiler_diagnostics`,
 `native_law_ranges`, and `compiler_multi_error` against its staged release
-executable and genuine Bend 2.0.37 provisioned by `scripts/bootstrap_bend.py`.
+executable and genuine Bend 2.0.38 provisioned by `scripts/bootstrap_bend.py`.
 Unix targets use fixed official asset IDs, sizes, and SHA-256 checksums for the
 compiler and adjacent resources. Windows has no official upstream distribution:
 its native Bun executable and exact upstream source archive are independently
@@ -110,8 +110,7 @@ forwarded to asset-host redirects, and is not inherited by compiler subprocesses
 These stdio E2Es cover independent errors at exact literal ranges, space/non-ASCII
 project and temporary paths, causal imports, original-error links, unsaved
 corrections, declaration spans, and compiler-owned `Base`. Quality CI requires
-the same three suites on all six native hosts; a separate macOS ARM64 job retains
-genuine Bend 2.0.36 compatibility coverage. Bend is not bundled with the LSP.
+the same three suites on all six native hosts. Bend is not bundled with the LSP.
 
 The full release suite is compiled once per native target. Nextest archives
 those same test binaries with the identical workspace, feature, lockfile, and

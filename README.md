@@ -402,9 +402,9 @@ operations produce a clear compatibility warning. Unknown version output is not
 a numeric-version rejection. Installing or replacing an executable allows a new probe.
 
 Enhanced checks report multiple independent compiler errors in one check,
-including imported-source errors, with the exact registered Bend 2.0.37 builds
-for macOS, Linux, and Windows on ARM64 and x86_64. Earlier verified Bend
-2.0.32–2.0.36 builds retain Apple Silicon macOS support. The adapter runs the
+including imported-source errors, with the exact registered Bend 2.0.38 builds
+for macOS, Linux, and Windows on ARM64 and x86_64. Other Bend versions get the
+textual CLI diagnostics. The adapter runs the
 installed compiler's own parser and checker; it does not introduce a separate
 type checker or require a separately installed JavaScript runtime. Executable
 bundle, target, and embedded runtime identities must match the verified registry
@@ -473,13 +473,13 @@ Installing the helpers requires Rust/Cargo and Go. The gate covers formatting,
 rustc, Clippy, tests, feature combinations, dependency policy, and GitHub Actions
 security checks (`actionlint`, `ghalint`, `zizmor`).
 
-The full gate automatically provisions genuine checksum-pinned Bend 2.0.37 when
+The full gate automatically provisions genuine checksum-pinned Bend 2.0.38 when
 `BEND2_COMPILER_TEST_PATH` is unset. To provision it explicitly on macOS/Linux:
 
 ```sh
-python3 scripts/bootstrap_bend.py --destination /tmp/bend-native-e2e-2.0.37
+python3 scripts/bootstrap_bend.py --destination /tmp/bend-native-e2e-2.0.38
 export BEND_NO_TELEMETRY=1
-export BEND2_COMPILER_TEST_PATH=/tmp/bend-native-e2e-2.0.37/bin/bend
+export BEND2_COMPILER_TEST_PATH=/tmp/bend-native-e2e-2.0.38/bin/bend
 ./scripts/quality
 ```
 
@@ -498,7 +498,7 @@ cargo test --locked --test native_compiler_diagnostics --test native_law_ranges 
 They check direct and transitive import locations, links to original errors,
 independent source errors, unsaved corrections, exact declaration spans, and
 compiler-owned versus user-owned `Base`, and spaces/non-ASCII workspace and
-temporary paths. A separate macOS ARM64 job retains Bend 2.0.36 coverage.
+temporary paths.
 
 Real Neovim E2E coverage runs the native server through Neovim's built-in LSP
 client with default and explicit configurations:
