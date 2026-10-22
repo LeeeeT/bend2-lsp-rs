@@ -313,7 +313,7 @@ fn gate_regression_stays_distinct_from_failed_collection() -> ToolResult<()> {
     policy_bundle(directory.path(), 48, 5)?;
     let report = data::collect(&directory.path().canonicalize()?)?;
     assert_eq!(report.status, "regression");
-    assert!(report.targets[0].errors.is_empty());
+    assert_eq!(report.targets[0].errors, Vec::<String>::new());
     assert!(report.result().is_err());
     assert_eq!(report.targets[0].regressions.len(), 5);
     assert!(report.targets[0].regressions[0].contains("Ir 1000→1021"));
@@ -345,7 +345,7 @@ fn completed_policy_pass_requires_real_retained_numeric_evidence() -> ToolResult
     policy_bundle(directory.path(), 48, 0)?;
     let report = data::collect(&directory.path().canonicalize()?)?;
     assert_eq!(report.status, "complete");
-    assert!(report.targets[0].regressions.is_empty());
+    assert_eq!(report.targets[0].regressions, Vec::<String>::new());
     assert_eq!(report.targets[0].documents[0].data["passed_count"], 48);
     report.result()?;
     Ok(())
@@ -393,7 +393,7 @@ fn missing_old_policy_verdict_never_infers_a_passing_gate() -> ToolResult<()> {
     common::write_json(&path, &manifest)?;
     let report = data::collect(&directory.path().canonicalize()?)?;
     assert_eq!(report.status, "incomplete");
-    assert!(report.targets[0].regressions.is_empty());
+    assert_eq!(report.targets[0].regressions, Vec::<String>::new());
     assert!(report.result().is_err());
     Ok(())
 }
@@ -432,7 +432,7 @@ fn coherent_verdict_cannot_invert_the_authoritative_metric_outcome() -> ToolResu
         common::write_json(&manifest_path, &manifest)?;
         let report = data::collect(&directory.path().canonicalize()?)?;
         assert_eq!(report.status, "failed");
-        assert!(report.targets[0].regressions.is_empty());
+        assert_eq!(report.targets[0].regressions, Vec::<String>::new());
         assert!(report.result().is_err());
     }
     Ok(())
@@ -493,7 +493,7 @@ fn verdict_inputs_are_bound_to_raw_artifact_integrity() -> ToolResult<()> {
     refresh_identity(directory.path(), name)?;
     let report = data::collect(&directory.path().canonicalize()?)?;
     assert_eq!(report.status, "failed");
-    assert!(report.targets[0].regressions.is_empty());
+    assert_eq!(report.targets[0].regressions, Vec::<String>::new());
     assert!(
         report.targets[0]
             .errors
@@ -630,7 +630,7 @@ fn changed_scope_and_native_memory_timeline_are_not_regressions() -> ToolResult<
     generate(directory.path())?;
     let report = data::collect(&directory.path().canonicalize()?)?;
     assert_eq!(report.status, "changed-scope");
-    assert!(report.targets[0].regressions.is_empty());
+    assert_eq!(report.targets[0].regressions, Vec::<String>::new());
     let html = fs::read_to_string(directory.path().join("index.html"))?;
     assert!(html.contains("Peak observed 2.00 MiB"));
     assert!(html.contains("after_root_removal"));

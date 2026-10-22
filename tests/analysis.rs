@@ -180,7 +180,7 @@ fn folding_preserves_blank_and_comment_line_boundaries() {
 #[test]
 fn folding_handles_empty_documents_and_unclosed_syntax_at_eof() {
     let empty = DocumentSnapshot::new(Revision(1), String::new());
-    assert!(folding_ranges(&empty).is_empty());
+    assert_eq!(folding_ranges(&empty), Vec::<FoldingRange>::new());
 
     let source = "broken(\n  nested\n    child";
     let malformed = DocumentSnapshot::new(Revision(2), source.to_owned());

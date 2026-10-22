@@ -302,7 +302,7 @@ fn regression_in_any_baseline_workload_fails() -> TestResult {
     assert_status(&output, 1)?;
     assert!(text(&output.stdout)?.contains("FAIL analysis::workload_11 [case_035]: Ir 100→103"));
     assert!(text(&output.stdout)?.contains("35/36 baseline workloads passed"));
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, Vec::<u8>::new());
     Ok(())
 }
 
@@ -517,7 +517,7 @@ fn prior_cli_flags_modes_and_help_are_preserved() -> TestResult {
     assert_status(&output, 0)?;
     assert!(text(&output.stdout)?.contains("--write-baseline-manifest"));
     assert!(text(&output.stdout)?.contains("--baseline-name"));
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, Vec::<u8>::new());
     let output = cli(
         &temporary.path().join("absent"),
         &[
@@ -565,7 +565,7 @@ fn retained_verdict_uses_the_authoritative_comparison_and_preserves_cli_failures
     ];
     let output = cli(&root, &arguments)?;
     assert_status(&output, 1)?;
-    assert!(output.stderr.is_empty());
+    assert_eq!(output.stderr, Vec::<u8>::new());
     assert!(text(&output.stdout)?.contains("43/48 baseline workloads passed."));
     let retained: Value = serde_json::from_slice(&fs::read(&verdict)?)?;
     assert_eq!(retained["status"], "regression");
@@ -713,7 +713,7 @@ fn assert_admission_rejected(output: &Output) -> TestResult {
         output.stdout.is_empty(),
         "classification emitted before validation"
     );
-    assert!(!output.stderr.is_empty());
+    assert_ne!(output.stderr, Vec::<u8>::new());
     Ok(())
 }
 
@@ -728,7 +728,7 @@ fn admission_preserves_real_pass_and_each_metric_regression() -> TestResult {
             &[],
         )?;
         assert_status(&output, 0)?;
-        assert!(output.stderr.is_empty());
+        assert_eq!(output.stderr, Vec::<u8>::new());
         let classified: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(
             classified["status"],

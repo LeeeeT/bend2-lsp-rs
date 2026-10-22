@@ -4451,7 +4451,7 @@ mod protocol {
                 .started
                 .recv_timeout(Duration::from_secs(5))
                 .must_be(reason);
-            assert!(!compiler_pid.is_empty());
+            assert_ne!(compiler_pid, "");
         }
 
         fn release(&self) {

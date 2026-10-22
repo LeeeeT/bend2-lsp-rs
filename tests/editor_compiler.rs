@@ -150,7 +150,10 @@ mod compiler {
             &root,
             "import dep.bend as Dep\ndef value() -> U32:\n  1\n",
         );
-        assert!(diagnostics(&mut client, &root, Some(1)).is_empty());
+        assert_eq!(
+            diagnostics(&mut client, &root, Some(1)),
+            Vec::<Value>::new()
+        );
         let imported = diagnostics(&mut client, &uri(&dependency), None);
         assert_eq!(
             imported[0]["range"],
@@ -211,9 +214,15 @@ mod compiler {
         let (directory, mut client) = compatible("exit 0", &[]);
         let root = uri(&directory.path().join("main.bend"));
         open(&mut client, &root, "def main() -> U32:\n  0\n");
-        assert!(diagnostics(&mut client, &root, Some(1)).is_empty());
+        assert_eq!(
+            diagnostics(&mut client, &root, Some(1)),
+            Vec::<Value>::new()
+        );
         client.notify("textDocument/didChange", json!({"textDocument":{"uri":root,"version":2},"contentChanges":[{"text":"def main() -> U32:\n  1\n"}]}));
-        assert!(diagnostics(&mut client, &root, Some(2)).is_empty());
+        assert_eq!(
+            diagnostics(&mut client, &root, Some(2)),
+            Vec::<Value>::new()
+        );
         let probes = fs::read_to_string(directory.path().join("bend.probes"))
             .must_be("read compatibility probes");
         assert_eq!(

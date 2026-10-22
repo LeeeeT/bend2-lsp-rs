@@ -855,7 +855,10 @@ mod tests {
         incomplete["coverage"]["loading_complete"] = json!(false);
         let outcome = decode(&incomplete, &source, &identity)?;
         assert!(outcome.incomplete);
-        assert!(outcome.diagnostics.is_empty());
+        assert_eq!(
+            outcome.diagnostics,
+            Vec::<(PathBuf, tower_lsp::lsp_types::Diagnostic)>::new()
+        );
         incomplete["coverage"]["loading_complete"] = json!(true);
         assert!(decode(&incomplete, &source, &identity).is_err());
         incomplete["status"] = json!("checked");

@@ -264,7 +264,10 @@ mod protocol {
         let target = definition(&mut client, &uri, &edited, "value");
         assert_eq!(target["uri"], json!(dep_uri));
         assert_eq!(target["range"]["start"], json!({"line":0,"character":4}));
-        assert!(actions(&mut client, &uri, &edited, "value", "quickfix").is_empty());
+        assert_eq!(
+            actions(&mut client, &uri, &edited, "value", "quickfix"),
+            Vec::<Value>::new()
+        );
         client.finish();
     }
 
@@ -291,7 +294,10 @@ mod protocol {
         );
         let unaliased = "import ./dep.bend\ndef main() -> U32:\n  value\n";
         change(&mut client, &uri, unaliased, 4);
-        assert!(actions(&mut client, &uri, unaliased, "value", "quickfix").is_empty());
+        assert_eq!(
+            actions(&mut client, &uri, unaliased, "value", "quickfix"),
+            Vec::<Value>::new()
+        );
         client.finish();
     }
 
@@ -319,7 +325,10 @@ mod protocol {
         );
         let missing = "def main() -> U32:\n  value\n";
         change(&mut client, &uri, missing, 3);
-        assert!(actions(&mut client, &uri, missing, "value", "quickfix").is_empty());
+        assert_eq!(
+            actions(&mut client, &uri, missing, "value", "quickfix"),
+            Vec::<Value>::new()
+        );
         client.finish();
     }
 
@@ -348,13 +357,22 @@ mod protocol {
             definition(&mut client, &uri, &edited, "builtin")["uri"],
             generated
         );
-        assert!(actions(&mut client, &uri, &edited, "builtin", "quickfix").is_empty());
+        assert_eq!(
+            actions(&mut client, &uri, &edited, "builtin", "quickfix"),
+            Vec::<Value>::new()
+        );
         let local_shadow = "def main(builtin: U32) -> U32:\n  Unknown.builtin\n";
         change(&mut client, &uri, local_shadow, 4);
-        assert!(actions(&mut client, &uri, local_shadow, "builtin\n", "quickfix").is_empty());
+        assert_eq!(
+            actions(&mut client, &uri, local_shadow, "builtin\n", "quickfix"),
+            Vec::<Value>::new()
+        );
         let global_shadow = "def builtin() -> U32:\n  1\ndef main() -> U32:\n  Unknown.builtin\n";
         change(&mut client, &uri, global_shadow, 5);
-        assert!(actions(&mut client, &uri, global_shadow, "builtin\n", "quickfix").is_empty());
+        assert_eq!(
+            actions(&mut client, &uri, global_shadow, "builtin\n", "quickfix"),
+            Vec::<Value>::new()
+        );
         client.finish();
     }
 
@@ -384,15 +402,15 @@ mod protocol {
             definition(&mut client, &uri, &edited, "value")["uri"],
             json!(dep_uri)
         );
-        assert!(
+        assert_eq!(
             actions(
                 &mut client,
                 &uri,
                 &edited,
                 "D.value",
                 "source.organizeImports"
-            )
-            .is_empty()
+            ),
+            Vec::<Value>::new()
         );
         client.finish();
     }
@@ -464,15 +482,15 @@ mod protocol {
                 "organizing the unsaved buffer must not write the file"
             );
             change(&mut client, &uri, &edited, version + 1);
-            assert!(
+            assert_eq!(
                 actions(
                     &mut client,
                     &uri,
                     &edited,
                     "  D.value",
                     "source.organizeImports"
-                )
-                .is_empty()
+                ),
+                Vec::<Value>::new()
             );
         }
         client.finish();
@@ -498,15 +516,15 @@ mod protocol {
             "import ./z.bend\nimport ./dep.bend\n\nimport ./z.bend as Pending extra\n# valid dependency\nimport ./dep.bend as D\nimport ./z.bend as Z\n\ndef main() -> U32:\n  value\n"
         );
         change(&mut client, &uri, &edited, 2);
-        assert!(
+        assert_eq!(
             actions(
                 &mut client,
                 &uri,
                 &edited,
                 "  value",
                 "source.organizeImports"
-            )
-            .is_empty()
+            ),
+            Vec::<Value>::new()
         );
         client.finish();
     }
@@ -535,15 +553,15 @@ mod protocol {
             definition(&mut client, &uri, &edited, "D # first")["uri"],
             json!(dep_uri)
         );
-        assert!(
+        assert_eq!(
             actions(
                 &mut client,
                 &uri,
                 &edited,
                 "import",
                 "source.organizeImports"
-            )
-            .is_empty()
+            ),
+            Vec::<Value>::new()
         );
         client.finish();
     }
