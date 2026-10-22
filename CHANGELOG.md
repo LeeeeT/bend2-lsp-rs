@@ -22,7 +22,8 @@
 
 - Classify the tokens of a document in the public `highlight` module, so that
   other programs highlight Bend code as the semantic tokens do. Each highlight
-  also tells whether its token declares a name. The semantic token legend now
+  also tells whether its token declares a name, and which declaration the
+  name refers to. The semantic token legend now
   has only the ten token types that the server sends.
 - Require genuine compiler diagnostics in all six native and installed-executable
   E2E matrices. Pin official Unix archives and build the Windows compiler from

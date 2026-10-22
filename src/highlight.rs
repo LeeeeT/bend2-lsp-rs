@@ -5,7 +5,7 @@
 use crate::{
     analysis::{SyntaxIndex, TextRange, TokenId, TokenKind},
     frontend::Meaning,
-    semantic::{DeclarationKind, Semantics, Target},
+    semantic::{DeclarationKind, Identity, Semantics, Target},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -43,18 +43,26 @@ impl Class {
     ];
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Highlight {
     pub range: TextRange,
     pub class: Class,
     /// The token declares its name: a binder, or the name of a declaration.
     pub declaration: bool,
+    /// The declaration that the token names, for the name of a declaration.
+    pub target: Option<Identity>,
 }
 
-/// The class of an identifier token from what its name means, and whether the
-/// token declares the name. A token with no meaning, as in a declaration that
-/// does not parse, gets no class.
-fn identifier(semantics: &Semantics, token: TextRange) -> Option<(Class, bool)> {
+/// What the lexer or the syntax tells about a token.
+fn lexical(class: Class, declaration: bool) -> (Class, bool, Option<Identity>) {
+    (class, declaration, None)
+}
+
+/// The class of an identifier token from what its name means, whether the
+/// token declares the name, and the declaration that the name refers to. A
+/// token with no meaning, as in a declaration that does not parse, gets no
+/// class.
+fn identifier(semantics: &Semantics, token: TextRange) -> Option<(Class, bool, Option<Identity>)> {
     let entry = semantics.entry()?;
     let end = entry
         .names
@@ -69,11 +77,11 @@ fn identifier(semantics: &Semantics, token: TextRange) -> Option<(Class, bool)> 
         && token.end == name.range.start + alias.len()
         && entry.aliases.iter().any(|(found, _)| found == alias)
     {
-        return Some((Class::Namespace, false));
+        return Some(lexical(Class::Namespace, false));
     }
     let declaration = match &name.meaning {
-        Meaning::Binder(_) => return Some((Class::Variable, true)),
-        Meaning::Local(_) => return Some((Class::Variable, false)),
+        Meaning::Binder(_) => return Some(lexical(Class::Variable, true)),
+        Meaning::Local(_) => return Some(lexical(Class::Variable, false)),
         Meaning::Declaration { .. } => true,
         Meaning::Global { .. } => false,
     };
@@ -87,11 +95,11 @@ fn identifier(semantics: &Semantics, token: TextRange) -> Option<(Class, bool)> 
         DeclarationKind::Type => Class::Type,
         DeclarationKind::Constructor => Class::Constructor,
     };
-    Some((class, declaration))
+    Some((class, declaration, Some(identity)))
 }
 
-/// The highlights of a document in source order. A universe, as `Type`, is a
-/// type. The path of an import is one string, and its alias declares a
+/// The highlights of a document in source order. The name of a declaration
+/// has the declaration as its target. A universe, as `Type`, is a type. The path of an import is one string, and its alias declares a
 /// namespace. Without semantics, as for a document that does not load,
 /// identifiers other than keywords, universes and aliases get none.
 #[must_use]
@@ -115,6 +123,7 @@ pub fn highlights(syntax: &SyntaxIndex, semantics: Option<&Semantics>) -> Vec<Hi
                     range: path,
                     class: Class::String,
                     declaration: false,
+                    target: None,
                 });
             }
             continue;
@@ -123,23 +132,24 @@ pub fn highlights(syntax: &SyntaxIndex, semantics: Option<&Semantics>) -> Vec<Hi
             .iter()
             .any(|import| import.alias == Some(token.range));
         let found = match token.kind {
-            TokenKind::Identifier if alias => Some((Class::Namespace, true)),
-            TokenKind::Comment => Some((Class::Comment, false)),
-            TokenKind::StringLiteral => Some((Class::String, false)),
-            TokenKind::Number => Some((Class::Number, false)),
-            TokenKind::Operator => Some((Class::Operator, false)),
+            TokenKind::Identifier if alias => Some(lexical(Class::Namespace, true)),
+            TokenKind::Comment => Some(lexical(Class::Comment, false)),
+            TokenKind::StringLiteral => Some(lexical(Class::String, false)),
+            TokenKind::Number => Some(lexical(Class::Number, false)),
+            TokenKind::Operator => Some(lexical(Class::Operator, false)),
             TokenKind::Identifier => match syntax.name_for_token(TokenId(index)) {
-                Some(name) if syntax.is_keyword(name) => Some((Class::Keyword, false)),
-                Some(name) if syntax.is_universe(name) => Some((Class::Type, false)),
+                Some(name) if syntax.is_keyword(name) => Some(lexical(Class::Keyword, false)),
+                Some(name) if syntax.is_universe(name) => Some(lexical(Class::Type, false)),
                 _ => semantics.and_then(|semantics| identifier(semantics, token.range)),
             },
             TokenKind::Punctuation | TokenKind::Delimiter => None,
         };
-        if let Some((class, declaration)) = found {
+        if let Some((class, declaration, target)) = found {
             result.push(Highlight {
                 range: token.range,
                 class,
                 declaration,
+                target,
             });
         }
     }

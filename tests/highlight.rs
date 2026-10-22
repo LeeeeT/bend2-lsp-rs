@@ -4,7 +4,7 @@ use bend2_lsp::{
     analysis::{DocumentSnapshot, Revision},
     frontend::{Env, Files, load},
     highlight::{Class, highlights},
-    semantic::Semantics,
+    semantic::{Identity, Semantics},
 };
 use std::{
     collections::HashMap,
@@ -93,6 +93,35 @@ fn a_loaded_document_classes_each_name_by_its_meaning() {
         })
         .count();
     assert_eq!(uses, 1, "the use of n is not a declaration: {found:?}");
+}
+
+#[test]
+fn the_name_of_a_declaration_has_the_declaration_as_its_target() {
+    let semantics = semantics(SOURCE);
+    let snapshot = DocumentSnapshot::new(Revision(0), SOURCE.to_owned());
+    let found: Vec<_> = highlights(&snapshot.syntax, Some(&semantics))
+        .into_iter()
+        .map(|found| (&SOURCE[found.range.start..found.range.end], found.target))
+        .collect();
+    let identity = |path: &str, name: &str, ctr: bool| {
+        Some(Identity {
+            path: PathBuf::from(path),
+            name: name.to_owned(),
+            ctr,
+        })
+    };
+    for expected in [
+        ("unit", identity(MAIN, "unit", false)),
+        ("Nat", identity(BASE, "Nat", false)),
+        ("Shape", identity(SHAPES, "Shape", false)),
+        ("Circle", identity(SHAPES, "Circle", true)),
+        ("Succ", identity(BASE, "Succ", true)),
+        ("n", None),
+        ("S", None),
+        ("def", None),
+    ] {
+        assert!(found.contains(&expected), "{expected:?} in {found:?}");
+    }
 }
 
 #[test]
