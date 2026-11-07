@@ -7,7 +7,9 @@ mod occurrences;
 
 use std::io::{self, BufRead, Write};
 
-use bend2_lsp::frontend::{Disk, Env, Load, TldTrace, TraceKind, error_json, json_string, load};
+use bend2_lsp::frontend::{
+    Disk, Env, Load, TldTrace, TraceKind, error_json, json_string, load_traced,
+};
 use sha2::{Digest, Sha256};
 
 fn digest(text: &str) -> String {
@@ -100,7 +102,7 @@ fn main() -> io::Result<()> {
             continue;
         }
         let start = std::time::Instant::now();
-        let loaded = load(&Disk, &env, &entry);
+        let loaded = load_traced(&Disk, &env, &entry);
         if timed {
             let files = loaded.files.len();
             let elapsed = start.elapsed().as_micros();

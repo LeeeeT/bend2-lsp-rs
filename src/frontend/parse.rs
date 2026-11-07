@@ -156,6 +156,7 @@ pub(super) struct Parse<'a> {
     pub events: &'a mut Vec<Recorded>,
     /// Keep the events of a declaration that fails.
     pub partial: bool,
+    pub trace_bodies: bool,
 }
 
 impl Parse<'_> {
@@ -1732,7 +1733,9 @@ impl Parse<'_> {
     }
 
     fn trace_body(&mut self, body: &Body, out: &Term) {
-        if let Some(tld) = self.tlds.last_mut() {
+        if self.trace_bodies
+            && let Some(tld) = self.tlds.last_mut()
+        {
             tld.bodies.push((body.clone(), out.clone()));
         }
     }

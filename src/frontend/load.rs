@@ -131,6 +131,7 @@ struct Loader<'a> {
     files: &'a dyn Files,
     env: &'a Env,
     partial: bool,
+    trace_bodies: bool,
     load: Load,
     seen: HashMap<String, Option<String>>,
 }
@@ -138,7 +139,7 @@ struct Loader<'a> {
 /// Load `entry` as the compiler loads the file it checks.
 #[must_use]
 pub fn load(files: &dyn Files, env: &Env, entry: &str) -> Load {
-    load_with(files, env, entry, false)
+    load_with(files, env, entry, false, false)
 }
 
 /// Load `entry` as `load` does, but keep what the parser decided in a
@@ -147,14 +148,20 @@ pub fn load(files: &dyn Files, env: &Env, entry: &str) -> Load {
 /// name means and which binders are visible at that position.
 #[must_use]
 pub fn load_partial(files: &dyn Files, env: &Env, entry: &str) -> Load {
-    load_with(files, env, entry, true)
+    load_with(files, env, entry, true, false)
 }
 
-fn load_with(files: &dyn Files, env: &Env, entry: &str, partial: bool) -> Load {
+#[must_use]
+pub fn load_traced(files: &dyn Files, env: &Env, entry: &str) -> Load {
+    load_with(files, env, entry, false, true)
+}
+
+fn load_with(files: &dyn Files, env: &Env, entry: &str, partial: bool, trace_bodies: bool) -> Load {
     let mut loader = Loader {
         files,
         env,
         partial,
+        trace_bodies,
         load: Load::default(),
         seen: HashMap::new(),
     };
@@ -619,6 +626,7 @@ impl Loader<'_> {
             tlds: &mut self.load.tlds,
             events: &mut events,
             partial: self.partial,
+            trace_bodies: self.trace_bodies,
         };
         let result = p.book();
         if result.is_err() && self.partial && ns.is_empty() {

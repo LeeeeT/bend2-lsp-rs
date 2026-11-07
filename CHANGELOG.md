@@ -25,6 +25,9 @@
 
 ### Under the hood
 
+- Keep parsed body traces only when the compiler-comparison tool requests them.
+  Normal and partial loads no longer retain unused imported bodies.
+
 - Classify the tokens of a document in the public `highlight` module, so that
   other programs highlight Bend code as the semantic tokens do. Each highlight
   also tells whether its token declares a name, and which declaration the

@@ -18,7 +18,8 @@ entry:
   binder index and span;
 - the error that stopped the load, if any.
 
-`bend2-oracle` (this crate) prints the same lines from the port. With
+`bend2-oracle` (this crate) calls `load_traced` and prints the same lines from
+the port. Normal and partial loads do not retain the body traces. With
 `--dump`, both print the whole traces instead of digests. `compare.py` reports
 each entry whose lines differ.
 

@@ -15,6 +15,7 @@ mod trace;
 pub use book::{Adt, Book, CtrDecl, Def, Tld};
 pub use load::{
     Disk, Env, ErrorText, Files, Load, LoadedFile, ReadingFile, Scope, load, load_partial,
+    load_traced,
 };
 pub use occurrence::{Binder, Meaning, Occurrence};
 pub use parse::resolve;
